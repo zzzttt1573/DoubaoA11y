@@ -1,0 +1,19 @@
+# 编译产物和本机配置
+.gradle/
+.kotlin/
+build/
+app/build/
+local.properties
+.idea/
+*.iml
+
+# 手机日志（可能含输入内容）
+logs/
+
+# 安装包和第三方工具（体积大，不进仓库）
+release/
+tools/lspatch/
+*.apk
+
+# 从豆包安装包提取或渲染的资料（字节的版权，只留在本地）
+docs/local/
