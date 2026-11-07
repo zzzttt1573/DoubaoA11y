@@ -35,7 +35,6 @@ object ServiceHooks {
             if (A11yState.recording) ViewA11yHooks.dumpTreeLater("键盘显示后")
             KeyboardState.onShown()
             TatansBridge.onShown()
-            ViewA11yHooks.service?.let { Disclaimer.maybeShow(it) }
             windowShown = true
             warnVersionOnce()
             if (A11yState.recording && KeyboardViewHooks.isEmpty()) KeyboardViewHooks.requestFullRedraw("键盘显示时键位表为空")
@@ -43,7 +42,6 @@ object ServiceHooks {
         Hooker.method(c, "onWindowHidden", arrayOf(), SafeHook("onWindowHidden", after = { _ ->
             Voice.onInputEnd()
             TatansBridge.onHidden()
-            Disclaimer.onHidden()
             VirtualKeys.reset()
             EditPanel.close()
             L.i("键盘窗口隐藏")

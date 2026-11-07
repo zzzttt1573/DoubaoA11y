@@ -115,6 +115,10 @@ object Names {
         "item_keyboard_adjust" to "调整键盘",
         "item_send" to "发送",
         "item_clear" to "清空",
+        // 表情面板
+        "btn_backspace" to "删除",
+        "btn_close" to "关闭",
+        "btn_history" to "最近使用",
         // 语音
         "asr_action_btn" to "语音",
         "asr_candidate_close" to "关闭",

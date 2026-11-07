@@ -133,8 +133,6 @@ object KeyboardViewHooks {
                 if (!A11yState.active) return@SafeHook
                 val ev = p.args[0] as MotionEvent
                 if ((v as View).parent !is View) {
-                    // 免责声明弹窗交给读屏正常浏览
-                    if (Disclaimer.isRoot(v)) return@SafeHook
                     if (Config.b("logTouch") && ev.actionMasked != MotionEvent.ACTION_HOVER_MOVE)
                         L.i("根悬停 ${Fmt.action(ev.action)} x=${ev.x.toInt()} y=${ev.y.toInt()} t=${ev.eventTime}")
                     // 键盘窗口根视图：长按删除或语音时由它接管（语音界面会盖住键盘）

@@ -50,6 +50,7 @@ class Key(val rect: Rect, val bg: DrawItem?, val labels: List<DrawItem>) {
 
     fun speakable(): String {
         toggleTarget()?.let { return it }
+        nineDigit()?.let { return it }
         val p = primary ?: return mainName()
         val main = labelName(p)
         val others = labels.filter { it !== p && it.kind == DrawItem.Kind.TEXT }
@@ -60,6 +61,23 @@ class Key(val rect: Rect, val bg: DrawItem?, val labels: List<DrawItem>) {
                 else if (o.cy() < p.cy() - 4 && o.size < p.size) "上滑$n" else n
             }
         return if (others.isEmpty()) main else main + "，" + others.joinToString("，")
+    }
+
+    /** 九键拼音按数字读（设置里打开）：@# 读 1，ABC 读 2 …… WXYZ 读 9 */
+    private fun nineDigit(): String? {
+        if (!Config.b("nineDigits") || KeyboardState.boardName != "九键拼音") return null
+        return when (primary?.text?.trim()?.uppercase()) {
+            "@#" -> "1"
+            "ABC" -> "2"
+            "DEF" -> "3"
+            "GHI" -> "4"
+            "JKL" -> "5"
+            "MNO" -> "6"
+            "PQRS" -> "7"
+            "TUV" -> "8"
+            "WXYZ" -> "9"
+            else -> null
+        }
     }
 
     /** 中英切换键：角上的小图标是点了之后去的键盘，读那个键盘的名字 */

@@ -136,6 +136,8 @@ object ViewA11yHooks {
         val cand = isCandidate(v)
         if (v is android.widget.TextView) {
             val t = v.text?.toString()?.trim()
+            // 图标字体画的按钮（表情面板的删除等）：按图标表读
+            if (!t.isNullOrEmpty() && t.any { Fmt.isPua(it) }) return IconNames.speakable(t).takeIf { it.isNotBlank() }
             if (!t.isNullOrEmpty()) return if (cand) CharWords.explainWord(Names.spoken(t)) else Names.spoken(t)
         }
         if (v is ViewGroup) {

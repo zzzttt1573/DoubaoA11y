@@ -27,11 +27,13 @@ object ConfigSpec {
     const val PREFS_NAME = "doubao_a11y_module"
 
     /** 设置页里的分组；FIXED 不显示，永远用默认值 */
-    enum class Group { HOLD, CANDIDATE, STATE, VIBRATE, DEBUG, FIXED }
+    enum class Group { INPUT, HOLD, CANDIDATE, STATE, VIBRATE, DEBUG, FIXED }
 
     class Item(val key: String, val label: String, val default: Boolean, val group: Group)
 
     val items = listOf(
+        // 输入方式
+        Item("nineDigits", "九键拼音按键读数字（如 abc 键读 2）", false, Group.INPUT),
         // 候选词解释
         Item("charExplain", "单字解释（如：高，提高的高）", true, Group.CANDIDATE),
         // 键盘状态提示
@@ -75,7 +77,14 @@ object ConfigSpec {
     /** 0.5 到 5 秒，0.1 秒一挡；值以毫秒保存 */
     private val holdOptions = (5..50).map { it * 100 to "${it / 10}.${it % 10} 秒" }
 
+    /** 输入方式：0 抬手输入（读屏焦点留在编辑框）；1 双击输入（按键交给读屏焦点，摸到读、双击输入） */
+    const val TYPE_LIFT = 0
+    const val TYPE_DOUBLE_TAP = 1
+
     val intItems = listOf(
+        IntItem("typeMode", "输入方式", TYPE_LIFT, listOf(
+            TYPE_LIFT to "抬手输入", TYPE_DOUBLE_TAP to "双击输入",
+        ), Group.INPUT),
         IntItem("deleteHoldMs", "删除键停留时间", 1500, holdOptions, Group.HOLD),
         IntItem("spaceHoldMs", "空格键停留时间", 1000, holdOptions, Group.HOLD),
         IntItem("explainMaxLen", "逐字解释字数", 1, listOf(

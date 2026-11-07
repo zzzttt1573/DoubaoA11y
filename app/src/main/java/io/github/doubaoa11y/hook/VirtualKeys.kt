@@ -224,7 +224,7 @@ object VirtualKeys {
     // ---------------- 悬停：摸到朗读，抬手输入，停留长按 ----------------
 
     /** 讯飞式：读屏焦点留在编辑框，模块自己朗读、自己处理抬手 */
-    val keepFocus: Boolean get() = Config.b("keepFocus")
+    val keepFocus: Boolean get() = Config.b("keepFocus") && Config.i("typeMode") != io.github.doubaoa11y.ConfigSpec.TYPE_DOUBLE_TAP
 
     private var holdRunnable: Runnable? = null
     private var holding: Key? = null

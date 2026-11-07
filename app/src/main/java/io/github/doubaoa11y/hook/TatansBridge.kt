@@ -180,13 +180,14 @@ object TatansBridge {
 
     /** 读屏焦点界面开着时不穿透（这些界面要用读屏焦点浏览） */
     private fun readerPanelOpen(): Boolean =
-        Disclaimer.showing || CustomToolbar.editing() || imeRoot()?.let { Panels.find(it) } != null
+        CustomToolbar.editing() || imeRoot()?.let { Panels.find(it) } != null
 
     fun update(why: String) {
         if (remote == null) return
         try {
             val want = Rect()
-            if (visible && Config.b("tatansFast") && A11yState.active && VirtualKeys.enabled && !readerPanelOpen()) {
+            // 双击输入时按键交给读屏焦点，不穿透
+            if (visible && Config.b("tatansFast") && A11yState.active && VirtualKeys.enabled && VirtualKeys.keepFocus && !readerPanelOpen()) {
                 val root = imeRoot()
                 val area = root?.let { r ->
                     val id = r.resources.getIdentifier("ime_inputview", "id", r.context.packageName)

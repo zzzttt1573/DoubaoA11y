@@ -32,11 +32,13 @@ class SettingsActivity : Activity() {
         prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
         pad = (16 * resources.displayMetrics.density).toInt()
         build()
+        Disclaimer.showIfNeeded(this) { send(ConfigSpec.CMD_STATUS) }
     }
 
     override fun onResume() {
         super.onResume()
-        send(ConfigSpec.CMD_STATUS)
+        // 使用须知还没同意时先不查状态，免得读屏读状态盖过须知
+        if (Disclaimer.agreed(this)) send(ConfigSpec.CMD_STATUS)
     }
 
     private fun build() {
@@ -53,6 +55,10 @@ class SettingsActivity : Activity() {
         }
         root.addView(status)
         root.addView(button("查询模块状态") { send(ConfigSpec.CMD_STATUS) })
+
+        root.addView(heading("输入方式"))
+        root.addView(note("抬手输入：摸到键读出来，抬手就输入。双击输入：摸到键读出来，双击输入，适合不习惯抬手输入的用户。只在触摸浏览开着时有区别"))
+        addGroup(root, Group.INPUT)
 
         root.addView(heading("延迟调整"))
         root.addView(note("删除键停留可快速删除，空格键停留进行语音输入"))
