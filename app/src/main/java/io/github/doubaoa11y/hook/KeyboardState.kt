@@ -46,13 +46,23 @@ object KeyboardState {
 
     private val speakOn: Boolean get() = VirtualKeys.enabled && Config.b("announceMode")
 
-    fun nameOf(type: String?, kbd: Int?): String =
-        kbd?.let { kbdNames[it] } ?: type?.let { typeNames[it] } ?: ("键盘 " + (type ?: kbd ?: "未知"))
+    fun nameOf(type: String?, kbd: Int?): String {
+        // 双拼的编号和全键拼音一样是 0，要看类型名（sp_input_xiaohe 等，按方案不同）
+        if (type != null && type.startsWith("sp_")) return "双拼键盘"
+        return kbd?.let { kbdNames[it] } ?: type?.let { typeNames[it] } ?: ("键盘 " + (type ?: kbd ?: "未知"))
+    }
+
+    /** 最近一次的中文键盘（英文键盘上的中英切换键切回去的那个） */
+    @Volatile
+    var lastChinese = ""
+        private set
+    private val notChinese = setOf("英文键盘", "符号键盘", "数字键盘", "数字符号键盘")
 
     /** 键盘切换后查询到类型 */
     fun onBoard(type: String?, kbd: Int?) {
         val name = nameOf(type, kbd)
         boardName = name
+        if (name !in notChinese && !name.startsWith("键盘 ")) lastChinese = name
         if (name == lastBoard) return
         val first = lastBoard.isEmpty()
         lastBoard = name

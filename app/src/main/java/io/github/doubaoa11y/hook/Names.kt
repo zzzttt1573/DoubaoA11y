@@ -84,6 +84,13 @@ object Names {
         "lookup_key_delete" to "删除",
         "lookup_key_redo" to "重写",
         "lookup_key_space" to "空格",
+        // 第一次打开时的“选择键盘类型”
+        "select_board9" to "九键拼音",
+        "select_board26" to "全键拼音",
+        "select_board_hand" to "手写键盘",
+        "select_board_stroke" to "笔画键盘",
+        "select_board_shuang" to "双拼键盘",
+        "select_board_wubi" to "五笔键盘",
         // 工具栏和候选栏
         "btn_hide" to "收起键盘",
         "btn_hide_remove" to "收起键盘",

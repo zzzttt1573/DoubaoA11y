@@ -20,11 +20,11 @@ object IconNames {
         0xe358 to "",
         0xe35e to "中文",
         0xe35c to "源语言",
-        0xe360 to "英文输入",
+        0xe360 to "中",  // 中英切换键的大“中”（读法看角标，见 DrawTable.toggleTarget）
         0xe359 to "",
         0xe35f to "目标语言",
         0xe35d to "A",
-        0xe361 to "中文输入",
+        0xe361 to "英",
         0xe35a to "123",
         0xe366 to "123",
         0xe38c to "数字",

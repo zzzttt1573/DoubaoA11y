@@ -49,6 +49,7 @@ class Key(val rect: Rect, val bg: DrawItem?, val labels: List<DrawItem>) {
     }
 
     fun speakable(): String {
+        toggleTarget()?.let { return it }
         val p = primary ?: return mainName()
         val main = labelName(p)
         val others = labels.filter { it !== p && it.kind == DrawItem.Kind.TEXT }
@@ -59,6 +60,25 @@ class Key(val rect: Rect, val bg: DrawItem?, val labels: List<DrawItem>) {
                 else if (o.cy() < p.cy() - 4 && o.size < p.size) "上滑$n" else n
             }
         return if (others.isEmpty()) main else main + "，" + others.joinToString("，")
+    }
+
+    /** 中英切换键：角上的小图标是点了之后去的键盘，读那个键盘的名字 */
+    private fun toggleTarget(): String? {
+        for (it in labels) {
+            val t = it.text?.trim() ?: continue
+            if (t.length != 1) continue
+            val target = when (t[0].code) {
+                0xe359 -> "英文键盘"
+                0xe376 -> "双拼键盘"
+                0xe39f -> "笔画键盘"
+                0xe3a1 -> "五笔键盘"
+                0xe385 -> "手写键盘"
+                0xe358 -> KeyboardState.lastChinese.ifEmpty { "中文键盘" }
+                else -> null
+            }
+            if (target != null) return target
+        }
+        return null
     }
 
     companion object {

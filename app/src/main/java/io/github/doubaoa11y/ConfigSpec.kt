@@ -21,7 +21,7 @@ object ConfigSpec {
     const val PREFS_NAME = "doubao_a11y_module"
 
     /** 设置页里的分组；FIXED 不显示，永远用默认值 */
-    enum class Group { HOLD, CANDIDATE, STATE, VIBRATE, DEBUG, FIXED }
+    enum class Group { HOLD, CANDIDATE, STATE, VIBRATE, READER, DEBUG, FIXED }
 
     class Item(val key: String, val label: String, val default: Boolean, val group: Group)
 
@@ -34,6 +34,8 @@ object ConfigSpec {
         Item("announceHide", "键盘关闭时提示", true, Group.STATE),
         // 震动
         Item("touchVibrate", "触摸震动", true, Group.VIBRATE),
+        // 读屏适配
+        Item("tatansFast", "天坦读屏快速打字", true, Group.READER),
         // 调试
         Item("runLog", "记录运行日志（会记下按键和语音文字，排查问题时才打开）", false, Group.DEBUG),
         Item("logDraw", "记录文字绘制", false, Group.DEBUG),

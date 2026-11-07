@@ -67,6 +67,10 @@ class SettingsActivity : Activity() {
         root.addView(heading("震动"))
         addGroup(root, Group.VIBRATE)
 
+        root.addView(heading("读屏适配"))
+        root.addView(note("天坦读屏开着触摸浏览时，键盘区域的触摸直接交给输入法，快速打字不会被当成双击。只对天坦读屏有效"))
+        addGroup(root, Group.READER)
+
         root.addView(heading("调试选项"))
         val debug = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL

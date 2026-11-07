@@ -47,6 +47,12 @@ object VirtualKeys {
     /** 讯飞式的“摸、抬手”处理：触摸浏览开着时由设置决定，关着（直接触摸）时总是 */
     private val explorer: Boolean get() = A11yState.directTouch || keepFocus
 
+    /**
+     * 手指触摸直接到键盘：触摸浏览关着，或者天坦读屏已设了触摸穿透。
+     * 天坦穿透没生效时收到的仍是悬停，照旧按触摸浏览处理，不会摸不到键。
+     */
+    val touchMode: Boolean get() = A11yState.directTouch || (A11yState.active && TatansBridge.requested)
+
     /** 模块自己送的触摸，不能再被当成手指拦下来 */
     @Volatile
     var injecting = false
@@ -812,7 +818,7 @@ object VirtualKeys {
      * 返回 true 表示吞掉（豆包收不到这次触摸，按键由模块合成）。
      */
     fun onRootTouch(root: View, ev: MotionEvent): Boolean {
-        if (!enabled || !A11yState.directTouch || injecting) return false
+        if (!enabled || !touchMode || injecting) return false
         // 删除和空格沿用豆包原来的触摸（长按连删、长按语音、空格滑动移光标等），整串触摸原样交给豆包
         if (ev.actionMasked == MotionEvent.ACTION_DOWN) {
             passThrough = false

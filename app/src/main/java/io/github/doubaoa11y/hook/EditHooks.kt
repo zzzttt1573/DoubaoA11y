@@ -6,27 +6,58 @@ package io.github.doubaoa11y.hook
  */
 object EditHooks {
     fun install(cl: ClassLoader) {
-        // 工具栏按钮点击：CandidateIdleView.N(按钮标识, 是否点击)
+        // 工具栏按钮点击：CandidateIdleView 里唯一的 (String 按钮标识, boolean) -> void 方法（1.5.3 叫 N，1.5.4 叫 Q）
         val idle = Hooker.findClassQuiet("com.bytedance.common_biz.tool_bar.view.views.CandidateIdleView", cl)
-        Hooker.method(idle, "N", arrayOf(String::class.java, Boolean::class.javaPrimitiveType!!), SafeHook("CandidateIdleView.N", before = { p ->
-            if ((p.args[0] == "btn_toolbar_one_hand" || p.args[0] == "btn_toolbar_move_cursor") && Config.b("editPanel")) {
-                if (EditPanel.open()) p.result = null
-            }
-        }))
-        // 菜单（工具箱）里的“移动光标”
-        val action = Hooker.findClassQuiet("com.bytedance.common_biz.tool_box.ToolboxItemAction", cl)
+        val click = idle?.declaredMethods?.filter {
+            it.returnType == Void.TYPE && it.parameterTypes.contentEquals(arrayOf(String::class.java, Boolean::class.javaPrimitiveType))
+        }.orEmpty()
+        if (click.size == 1) {
+            L.i("工具栏点击方法：${click[0].name}")
+            Hooker.hookMember(click[0], SafeHook("CandidateIdleView.${click[0].name}", before = { p ->
+                if ((p.args[0] == "btn_toolbar_one_hand" || p.args[0] == "btn_toolbar_move_cursor") && Config.b("editPanel")) {
+                    if (EditPanel.open()) p.result = null
+                }
+            }))
+        } else {
+            L.w("找不到工具栏点击方法，候选 ${click.size} 个，编辑面板只能从菜单打开")
+        }
+        // 菜单（工具箱）里的“单手模式”“移动光标”
+        val action = Hooker.findClassQuiet("com.bytedance.common_biz.tool_box.ToolboxItemAction", cl) ?: return
         val handler = Hooker.findClassQuiet("com.bytedance.android.input.keyboard.areacontrol.v", cl)
-        if (action != null && handler != null) {
-            Hooker.method(handler, "invoke", arrayOf(action), SafeHook("Toolbox.invoke", before = { p ->
-                val n = (p.args[0] as? Enum<*>)?.name
-                if ((n == "ONE_HAND" || n == "MOVE_CURSOR") && Config.b("editPanel")) {
-                    // 先关掉菜单（点菜单的返回键），再打开编辑面板
+        val old = handler?.let { de.robv.android.xposed.XposedHelpers.findMethodExactIfExists(it, "invoke", action) }
+        if (old != null) {
+            // 1.5.3：菜单点击的处理函数 invoke(ToolboxItemAction)，返回 Kotlin Unit
+            Hooker.hookMember(old, SafeHook("Toolbox.invoke", before = { p ->
+                if (wantsEditPanel(p.args[0])) {
                     val unit = unitOf((p.method as java.lang.reflect.Method).returnType) ?: return@SafeHook
                     p.result = unit
                     EditPanel.closeToolboxThenOpen()
                 }
             }))
+            return
         }
+        // 1.5.4 起：ToolboxKeyboardView 的静态方法 (ToolboxKeyboardView, ToolboxItemAction) -> void 把点击转给处理函数
+        val view = Hooker.findClassQuiet("com.bytedance.common_biz.tool_box.ToolboxKeyboardView", cl) ?: return
+        val dispatch = view.declaredMethods.filter {
+            java.lang.reflect.Modifier.isStatic(it.modifiers) && it.returnType == Void.TYPE &&
+                it.parameterTypes.contentEquals(arrayOf(view, action))
+        }
+        if (dispatch.size != 1) {
+            L.w("找不到菜单点击方法，候选 ${dispatch.size} 个，菜单里的单手模式不会改成编辑面板")
+            return
+        }
+        L.i("菜单点击方法：${dispatch[0].name}")
+        Hooker.hookMember(dispatch[0], SafeHook("Toolbox.${dispatch[0].name}", before = { p ->
+            if (wantsEditPanel(p.args[1])) {
+                p.result = null
+                EditPanel.closeToolboxThenOpen()
+            }
+        }))
+    }
+
+    private fun wantsEditPanel(a: Any?): Boolean {
+        val n = (a as? Enum<*>)?.name
+        return (n == "ONE_HAND" || n == "MOVE_CURSOR") && Config.b("editPanel")
     }
 
     /** 豆包混淆过的 Kotlin Unit：返回类型里那个单例 */

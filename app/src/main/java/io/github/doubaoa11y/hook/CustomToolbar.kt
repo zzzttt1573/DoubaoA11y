@@ -164,6 +164,8 @@ object CustomToolbar {
         if (!isContent(content)) return
         L.i("打开了定制工具栏，交给读屏")
         current = java.lang.ref.WeakReference(content)
+        TatansBridge.update("打开定制工具栏")
+        w.setOnDismissListener(wrapDismiss(w))
         main.postDelayed({
             try {
                 refreshRow(content)
@@ -179,6 +181,24 @@ object CustomToolbar {
                 L.hookError("CustomToolbar.onShown", t)
             }
         }, 450)
+    }
+
+    /** 定制工具栏关掉后恢复穿透（保留豆包自己的关闭回调） */
+    private fun wrapDismiss(w: PopupWindow): PopupWindow.OnDismissListener {
+        val old = try {
+            val f = PopupWindow::class.java.getDeclaredField("mOnDismissListener")
+            f.isAccessible = true
+            f.get(w) as? PopupWindow.OnDismissListener
+        } catch (_: Throwable) {
+            null
+        }
+        return PopupWindow.OnDismissListener {
+            try {
+                old?.onDismiss()
+            } finally {
+                main.postDelayed({ TatansBridge.update("关闭定制工具栏") }, 200)
+            }
+        }
     }
 
     // ---- 弹出窗口顶部的一排代理按钮：对应键盘上方工具栏的“完成”和已添加的工具 ----

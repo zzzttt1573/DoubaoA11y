@@ -34,12 +34,14 @@ object ServiceHooks {
             L.i("键盘窗口显示（${A11yState.describe()}）")
             if (A11yState.recording) ViewA11yHooks.dumpTreeLater("键盘显示后")
             KeyboardState.onShown()
+            TatansBridge.onShown()
             windowShown = true
             warnVersionOnce()
             if (A11yState.recording && KeyboardViewHooks.isEmpty()) KeyboardViewHooks.requestFullRedraw("键盘显示时键位表为空")
         }))
         Hooker.method(c, "onWindowHidden", arrayOf(), SafeHook("onWindowHidden", after = { _ ->
             Voice.onInputEnd()
+            TatansBridge.onHidden()
             VirtualKeys.reset()
             EditPanel.close()
             L.i("键盘窗口隐藏")
@@ -129,6 +131,7 @@ object ServiceHooks {
         Speaker.init(ctx)
         Haptic.init(ctx)
         A11yState.init(ctx)
+        TatansBridge.init(ctx)
         L.i("模块初始化完成。${versionInfo(ctx)}。${A11yState.describe()}。${Hooker.summary()}。设置：${Config.summary()}")
         if (Config.b("traceAllJni")) JniHooks.installTraceAll()
         registerReceiver(ctx)
@@ -187,6 +190,7 @@ object ServiceHooks {
             }
         }
         L.i("收到设置（cmd=$cmd）：${Config.summary()}")
+        TatansBridge.refresh("设置变化")
         A11yState.refresh("设置变化")
         if (cmd == ConfigSpec.CMD_DUMP) {
             L.forceUntil = android.os.SystemClock.uptimeMillis() + 3000

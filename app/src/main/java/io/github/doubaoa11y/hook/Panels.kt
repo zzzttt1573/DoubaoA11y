@@ -71,6 +71,7 @@ object Panels {
                 val panel = find(root) ?: return@postDelayed
                 if (!panel.isShown) return@postDelayed
                 note(panel)
+                TatansBridge.update("打开读屏面板")
                 L.i("打开了 ${panel.javaClass.simpleName}，交给读屏")
                 if (panel.javaClass.simpleName == "ToolboxKeyboardView") ToolboxPager.focusFirst(panel)
                 else focusFirst(panel)

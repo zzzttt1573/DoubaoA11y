@@ -133,6 +133,8 @@ object KeyboardViewHooks {
                 if (!A11yState.active) return@SafeHook
                 val ev = p.args[0] as MotionEvent
                 if ((v as View).parent !is View) {
+                    if (Config.b("logTouch") && ev.actionMasked != MotionEvent.ACTION_HOVER_MOVE)
+                        L.i("根悬停 ${Fmt.action(ev.action)} x=${ev.x.toInt()} y=${ev.y.toInt()} t=${ev.eventTime}")
                     // 键盘窗口根视图：长按删除或语音时由它接管（语音界面会盖住键盘）
                     if (VirtualKeys.onRootHover(v, ev)) p.result = true
                     return@SafeHook
@@ -147,7 +149,12 @@ object KeyboardViewHooks {
         // 触摸浏览关着：手指触摸直接到键盘窗口，由模块当成摸和抬手处理
         Hooker.method(ViewGroup::class.java, "dispatchTouchEvent", arrayOf(MotionEvent::class.java),
             SafeHook("dispatchTouchEvent", before = { p ->
-                if (!A11yState.directTouch || VirtualKeys.injecting) return@SafeHook
+                if (Config.b("logTouch") && (p.thisObject as View).parent !is View) {
+                    val e = p.args[0] as MotionEvent
+                    if (e.actionMasked != MotionEvent.ACTION_MOVE)
+                        L.i("根触摸 ${Fmt.action(e.action)} x=${e.x.toInt()} y=${e.y.toInt()} t=${e.eventTime} 走触摸=${VirtualKeys.touchMode} 天坦=${TatansBridge.requested}")
+                }
+                if (!VirtualKeys.touchMode || VirtualKeys.injecting) return@SafeHook
                 val v = p.thisObject as View
                 if (v.parent is View) return@SafeHook
                 val imeRoot = try {
