@@ -21,6 +21,7 @@ class HookEntry : IXposedHookLoadPackage {
             Voice.install()
             CustomToolbar.install()
             EditHooks.install(cl)
+            StepSlider.install(cl)
             L.i("hook 安装结束：${Hooker.summary()}")
             val d = Hooker.details()
             if (d.isNotBlank()) L.w("hook 问题明细：\n$d")

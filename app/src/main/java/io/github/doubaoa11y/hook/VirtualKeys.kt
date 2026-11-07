@@ -389,6 +389,12 @@ object VirtualKeys {
                 val c = current
                 current = null
                 cancelHold()
+                // 手指往上滑出键盘：系统在键盘上边缘（里面几个像素）发“离开”，不是抬手。
+                // 上边缘这一条里只有正好压在目标上才算抬手（候选词占满候选栏高度，照样能点），“附近”不算
+                if (c != null && nearTop(root, ry) && !(t != null && c.same(t))) {
+                    L.i("手指滑出键盘上方，不输入「${c.name}」 y=${ry.toInt()}")
+                    return true
+                }
                 if (c != null && ((t != null && c.same(t)) || (t == null && near(c, rx, ry)))) {
                     if (c.key != null && c.kb != null) {
                         L.i("抬手输入「${c.name}」")
@@ -514,8 +520,37 @@ object VirtualKeys {
                 depth++
             }
         }
+        // 整条可点的容器（工具栏上的剪贴板条）里只有一个带文字的可点项目：点那个项目，不点容器中间的空白
+        if (v is android.view.ViewGroup) {
+            onlyClickableChild(v)?.let { v = it }
+        }
         val name = ViewA11yHooks.spokenName(v) ?: return null
         return Target(null, null, v, name)
+    }
+
+    private fun onlyClickableChild(g: android.view.ViewGroup): View? {
+        var found: View? = null
+        var count = 0
+        fun walk(x: View) {
+            if (count > 1 || x.visibility != View.VISIBLE) return
+            if (x !== g && (x.isClickable || x.isLongClickable)) {
+                if (hasText(x)) {
+                    count++
+                    found = x
+                }
+                return
+            }
+            if (x is android.view.ViewGroup) for (i in 0 until x.childCount) walk(x.getChildAt(i))
+        }
+        walk(g)
+        return if (count == 1) found else null
+    }
+
+    private fun hasText(x: View): Boolean {
+        if (x.visibility != View.VISIBLE) return false
+        if (x is android.widget.TextView && !x.text.isNullOrBlank()) return true
+        if (x is android.view.ViewGroup) for (i in 0 until x.childCount) if (hasText(x.getChildAt(i))) return true
+        return false
     }
 
     private val PANEL = Any()
@@ -589,6 +624,16 @@ object VirtualKeys {
             if (c.visibility == View.VISIBLE && contains(c, rx, ry)) return true
         }
         return false
+    }
+
+    /** 屏幕坐标 ry 在键盘区域上边往下 12dp 以内，或者更上面 */
+    private fun nearTop(root: View, ry: Float): Boolean {
+        val id = root.resources.getIdentifier("ime_inputview", "id", root.context.packageName)
+        val area = (if (id != 0) root.findViewById<View>(id) else null) ?: return false
+        if (!area.isShown || area.height <= 0) return false
+        val loc = IntArray(2)
+        area.getLocationOnScreen(loc)
+        return ry < loc[1] + 12 * root.resources.displayMetrics.density
     }
 
     /** 手指在上一个目标附近（扩大 16dp） */
@@ -712,8 +757,46 @@ object VirtualKeys {
         scrollRunnable = null
         val k = holding ?: return
         val v = holdView ?: run { holding = null; return }
+        if (holdIsVoice && !voiceShown(v)) {
+            // 语音快开始时手指离开空格：豆包不认取消（照样开始语音），改成滑到键盘上方再松开，不输入
+            val down = holdDownTime
+            val vl = IntArray(2)
+            v.getLocationOnScreen(vl)
+            val x = vl[0] + k.rect.exactCenterX()
+            val y = vl[1] - 300f
+            holding = null
+            holdView = null
+            holdIsVoice = false
+            lastHoldEnd = SystemClock.uptimeMillis()
+            L.i("取消「${k.speakable()}」，语音还没开始，滑出键盘松开，按住 ${SystemClock.uptimeMillis() - down} 毫秒")
+            inject(v, down, MotionEvent.ACTION_MOVE, x, y)
+            inject(v, down, MotionEvent.ACTION_UP, x, y)
+            adoptVoiceLater(v, k, down)
+            return
+        }
         // 手指滑到别的键上：取消，不输入
         release(v, k, MotionEvent.ACTION_CANCEL, lastRawX, lastRawY)
+    }
+
+    /**
+     * 保险：取消后豆包还是开始了语音，没人按着就结束不了，触摸也全被语音界面占住。
+     * 这时把语音接回来，当成手指还按着空格：下一次摸屏幕可以上滑撤回、发送，抬手结束。
+     */
+    private fun adoptVoiceLater(v: View, k: Key, down: Long) {
+        main.postDelayed({
+            try {
+                if (holding != null || !voiceShown(v)) return@postDelayed
+                L.w("取消空格后豆包仍开始了语音，接回语音控制")
+                holding = k
+                holdView = v
+                holdIsVoice = true
+                voiceZone = ""
+                holdDownTime = down
+                Speaker.speak("正在语音输入，摸屏幕再抬手结束")
+            } catch (t: Throwable) {
+                L.hookError("VirtualKeys.adoptVoice", t)
+            }
+        }, NATIVE_LONG_PRESS_MS + 600)
     }
 
     private fun release(v: View, k: Key, action: Int, rawX: Float, rawY: Float) {

@@ -35,6 +35,7 @@ object ServiceHooks {
             if (A11yState.recording) ViewA11yHooks.dumpTreeLater("键盘显示后")
             KeyboardState.onShown()
             TatansBridge.onShown()
+            ViewA11yHooks.service?.window?.window?.decorView?.let { StretchPanel.watch(it) }
             windowShown = true
             warnVersionOnce()
             if (A11yState.recording && KeyboardViewHooks.isEmpty()) KeyboardViewHooks.requestFullRedraw("键盘显示时键位表为空")
