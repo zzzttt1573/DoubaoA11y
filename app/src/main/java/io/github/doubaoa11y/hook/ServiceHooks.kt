@@ -35,6 +35,7 @@ object ServiceHooks {
             if (A11yState.recording) ViewA11yHooks.dumpTreeLater("键盘显示后")
             KeyboardState.onShown()
             TatansBridge.onShown()
+            ViewA11yHooks.service?.let { Disclaimer.maybeShow(it) }
             windowShown = true
             warnVersionOnce()
             if (A11yState.recording && KeyboardViewHooks.isEmpty()) KeyboardViewHooks.requestFullRedraw("键盘显示时键位表为空")
@@ -42,6 +43,7 @@ object ServiceHooks {
         Hooker.method(c, "onWindowHidden", arrayOf(), SafeHook("onWindowHidden", after = { _ ->
             Voice.onInputEnd()
             TatansBridge.onHidden()
+            Disclaimer.onHidden()
             VirtualKeys.reset()
             EditPanel.close()
             L.i("键盘窗口隐藏")
@@ -58,13 +60,13 @@ object ServiceHooks {
         try {
             val pi = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
             val code = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode else @Suppress("DEPRECATION") pi.versionCode.toLong()
-            if (code == ConfigSpec.TARGET_VERSION_CODE || !VirtualKeys.enabled) return
+            if (code in ConfigSpec.SUPPORTED_VERSIONS || !VirtualKeys.enabled) return
             val p = ctx.getSharedPreferences(ConfigSpec.PREFS_NAME, Context.MODE_PRIVATE)
             if (p.getLong("warnedVersion", 0L) == code) return
             p.edit().putLong("warnedVersion", code).apply()
             L.w("豆包版本 ${pi.versionName}（$code）与适配版本不同，已提醒")
             main.postDelayed({
-                Speaker.speak("注意：豆包输入法已更新到 ${pi.versionName}，无障碍模块是按 1.5.3 适配的，部分功能可能失效")
+                Speaker.speak("注意：豆包输入法已更新到 ${pi.versionName}，无障碍模块适配的是 ${ConfigSpec.SUPPORTED_NAMES}，部分功能可能失效")
             }, 1200)
         } catch (t: Throwable) {
             L.e("检查版本失败", t)
@@ -78,6 +80,7 @@ object ServiceHooks {
     private fun onHiding(from: String) {
         L.i("键盘开始收起（$from）")
         KeyboardState.onHidden()
+        TatansBridge.onHidden()
     }
 
     /**
@@ -140,7 +143,7 @@ object ServiceHooks {
     private fun versionInfo(ctx: Context): String = try {
         val pi = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
         val code = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode else @Suppress("DEPRECATION") pi.versionCode.toLong()
-        val warn = if (code != ConfigSpec.TARGET_VERSION_CODE) "（注意：模块按 1.5.3 / ${ConfigSpec.TARGET_VERSION_CODE} 适配，版本不同可能有部分功能失效）" else ""
+        val warn = if (code !in ConfigSpec.SUPPORTED_VERSIONS) "（注意：模块适配 ${ConfigSpec.SUPPORTED_NAMES}，版本不同可能有部分功能失效）" else ""
         "豆包输入法 ${pi.versionName}（$code）$warn"
     } catch (t: Throwable) {
         "豆包版本未知"
@@ -211,8 +214,8 @@ object ServiceHooks {
         val ver = try {
             val pi = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
             val code = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode else @Suppress("DEPRECATION") pi.versionCode.toLong()
-            if (code == ConfigSpec.TARGET_VERSION_CODE) "豆包输入法 ${pi.versionName}，版本匹配"
-            else "注意：豆包输入法是 ${pi.versionName}，版本不匹配，模块按 1.5.3 适配，部分功能可能失效"
+            if (code in ConfigSpec.SUPPORTED_VERSIONS) "豆包输入法 ${pi.versionName}，版本匹配"
+            else "注意：豆包输入法是 ${pi.versionName}，版本不匹配，模块适配 ${ConfigSpec.SUPPORTED_NAMES}，部分功能可能失效"
         } catch (t: Throwable) {
             "豆包版本未知"
         }

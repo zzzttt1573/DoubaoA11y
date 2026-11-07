@@ -40,6 +40,8 @@ object TatansBridge {
     private var binding = false
     private var bound = false
     private val current = Rect()
+    /** 键盘窗口显示着（收起动画期间也算收起） */
+    private var visible = false
 
     /** 已经请求天坦把键盘区域设为穿透（手指触摸可能直接到输入法） */
     val requested: Boolean get() = remote != null && !current.isEmpty
@@ -151,6 +153,7 @@ object TatansBridge {
 
     /** 键盘显示：按键盘区域设置穿透，布局变化时跟着更新 */
     fun onShown() {
+        visible = true
         refresh("键盘显示")
         val root = imeRoot() ?: return
         if (listenedRoot !== root) {
@@ -165,6 +168,7 @@ object TatansBridge {
     }
 
     fun onHidden() {
+        visible = false
         send(Rect(), "键盘收起")
     }
 
@@ -176,13 +180,13 @@ object TatansBridge {
 
     /** 读屏焦点界面开着时不穿透（这些界面要用读屏焦点浏览） */
     private fun readerPanelOpen(): Boolean =
-        CustomToolbar.editing() || imeRoot()?.let { Panels.find(it) } != null
+        Disclaimer.showing || CustomToolbar.editing() || imeRoot()?.let { Panels.find(it) } != null
 
     fun update(why: String) {
         if (remote == null) return
         try {
             val want = Rect()
-            if (Config.b("tatansFast") && A11yState.active && VirtualKeys.enabled && !readerPanelOpen()) {
+            if (visible && Config.b("tatansFast") && A11yState.active && VirtualKeys.enabled && !readerPanelOpen()) {
                 val root = imeRoot()
                 val area = root?.let { r ->
                     val id = r.resources.getIdentifier("ime_inputview", "id", r.context.packageName)

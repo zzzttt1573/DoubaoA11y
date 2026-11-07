@@ -5,8 +5,14 @@ package io.github.doubaoa11y
  * 设置界面通过广播把值发给豆包进程，豆包进程存进自己的 SharedPreferences。
  */
 object ConfigSpec {
+    /** 模块自己的版本（build.gradle.kts 从这里读） */
+    const val MODULE_VERSION_CODE = 40
+    const val MODULE_VERSION_NAME = "1.1.0"
+
     const val TARGET_PACKAGE = "com.bytedance.android.doubaoime"
-    const val TARGET_VERSION_CODE = 100503008L
+    /** 已适配的豆包版本：版本号 -> 版本名 */
+    val SUPPORTED_VERSIONS = mapOf(100503008L to "1.5.3", 100504010L to "1.5.4")
+    val SUPPORTED_NAMES: String get() = SUPPORTED_VERSIONS.values.joinToString("、")
 
     /** 设置广播。extras：各开关的 boolean 值；可选 "cmd" = status / dump / reset。 */
     const val ACTION_CONFIG = "io.github.doubaoa11y.CONFIG"
@@ -21,7 +27,7 @@ object ConfigSpec {
     const val PREFS_NAME = "doubao_a11y_module"
 
     /** 设置页里的分组；FIXED 不显示，永远用默认值 */
-    enum class Group { HOLD, CANDIDATE, STATE, VIBRATE, READER, DEBUG, FIXED }
+    enum class Group { HOLD, CANDIDATE, STATE, VIBRATE, DEBUG, FIXED }
 
     class Item(val key: String, val label: String, val default: Boolean, val group: Group)
 
@@ -34,8 +40,6 @@ object ConfigSpec {
         Item("announceHide", "键盘关闭时提示", true, Group.STATE),
         // 震动
         Item("touchVibrate", "触摸震动", true, Group.VIBRATE),
-        // 读屏适配
-        Item("tatansFast", "天坦读屏快速打字", true, Group.READER),
         // 调试
         Item("runLog", "记录运行日志（会记下按键和语音文字，排查问题时才打开）", false, Group.DEBUG),
         Item("logDraw", "记录文字绘制", false, Group.DEBUG),
@@ -57,6 +61,7 @@ object ConfigSpec {
         Item("speakCandidate", "朗读第一个候选", true, Group.FIXED),
         Item("editPanel", "编辑面板", true, Group.FIXED),
         Item("voiceBuffer", "语音说完再上屏", true, Group.FIXED),
+        Item("tatansFast", "天坦读屏快速打字", true, Group.FIXED),
         Item("labelViews", "按钮中文名", true, Group.FIXED),
         Item("queryNative", "查询键盘类型", true, Group.FIXED),
     )
