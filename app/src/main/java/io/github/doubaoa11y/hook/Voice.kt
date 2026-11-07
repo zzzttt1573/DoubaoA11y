@@ -135,7 +135,10 @@ object Voice {
         if (buffering && held != null) L.i("新一次语音，丢掉上次没上屏的「$held」")
         end("新一次语音")
         held = null
-        if (Config.b("voiceBuffer") && A11yState.recording) {
+        // 翻译模式下豆包靠组字区域把原文换成译文，拦了会留下原文、吞掉一部分，所以不拦
+        val translating = KeyboardViewHooks.translateShown || translateViewShown()
+        if (translating) L.i("翻译模式，语音不做说完再上屏")
+        if (Config.b("voiceBuffer") && A11yState.recording && !translating) {
             buffering = true
             held = null
         }
@@ -143,6 +146,15 @@ object Voice {
         spoken = false
         sessionUntil = Long.MAX_VALUE
         L.i("语音：开始录音")
+    }
+
+    private fun translateViewShown(): Boolean = try {
+        val root = ViewA11yHooks.service?.window?.window?.decorView
+        val id = root?.resources?.getIdentifier("translate_view", "id", root.context.packageName) ?: 0
+        val v = if (id != 0) root?.findViewById<android.view.View>(id) else null
+        v != null && v.isShown
+    } catch (_: Throwable) {
+        false
     }
 
     private fun onStop() {

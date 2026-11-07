@@ -23,6 +23,11 @@ object KeyboardViewHooks {
 
     var kbClass: Class<*>? = null
         private set
+
+    /** 翻译模式：键盘上方的翻译输入条（translate_view）最近一次是显示的。语音开始后豆包会临时把它藏起来 */
+    @Volatile
+    var translateShown = false
+        private set
     private var fDirty: Field? = null
     private var fWindowName: Field? = null
     private var fNativeId: Field? = null
@@ -61,7 +66,9 @@ object KeyboardViewHooks {
             synchronized(tables) { tables[p.thisObject]?.windowName = p.args[1] as? String ?: "?" }
         }))
         Hooker.method(c, "showView", arrayOf(Z), SafeHook("showView", before = { p ->
-            L.i("showView 窗口=${windowName(p.thisObject)} 显示=${p.args[0]}")
+            val w = windowName(p.thisObject)
+            L.i("showView 窗口=$w 显示=${p.args[0]}")
+            if (w == "translate_view") translateShown = p.args[0] == true
         }))
         Hooker.method(c, "onSizeChanged", arrayOf(I, I, I, I), SafeHook("onSizeChanged", after = { p ->
             L.i("onSizeChanged 窗口=${windowName(p.thisObject)} ${p.args[2]}x${p.args[3]} → ${p.args[0]}x${p.args[1]}")
