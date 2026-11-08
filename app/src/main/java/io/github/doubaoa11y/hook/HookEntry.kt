@@ -19,6 +19,7 @@ class HookEntry : IXposedHookLoadPackage {
             InputHooks.install()
             ViewA11yHooks.install()
             Voice.install()
+            Candidates.install()
             CustomToolbar.install()
             EditHooks.install(cl)
             StepSlider.install(cl)

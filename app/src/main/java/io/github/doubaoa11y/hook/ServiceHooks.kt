@@ -27,6 +27,7 @@ object ServiceHooks {
         Hooker.method(c, "onStartInputView", arrayOf(EditorInfo::class.java, Boolean::class.javaPrimitiveType!!),
             SafeHook("onStartInputView", after = { p ->
                 val ei = p.args[0] as? EditorInfo
+                Candidates.reset("换输入框")
                 L.i("onStartInputView 应用=${ei?.packageName} 输入类型=0x${Integer.toHexString(ei?.inputType ?: 0)} 回车动作=0x${Integer.toHexString(ei?.imeOptions ?: 0)} 重启=${p.args[1]}")
             }))
         installHideHooks(cl)
@@ -48,6 +49,7 @@ object ServiceHooks {
         }))
         Hooker.method(c, "onWindowHidden", arrayOf(), SafeHook("onWindowHidden", after = { _ ->
             Voice.onInputEnd()
+            Candidates.reset("键盘收起")
             TatansBridge.onHidden()
             VirtualKeys.reset()
             EditPanel.close()

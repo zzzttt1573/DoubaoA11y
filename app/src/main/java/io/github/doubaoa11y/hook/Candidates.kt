@@ -139,6 +139,28 @@ object Candidates {
         }
     }
 
+    /**
+     * 上屏、收起键盘、换输入框时清掉候选状态。豆包上屏后不一定再送一份空的候选栏，
+     * 不清的话模块一直以为还在打拼音：空格不能语音，逗号句号还在切换候选。
+     * 上屏后还剩拼音的（只选了前半截），豆包会紧接着送新的候选栏，状态会再设回来。
+     */
+    fun install() {
+        InputHooks.onCommit { _, _ -> reset("上屏") }
+    }
+
+    fun reset(why: String) {
+        if (pinyin.isEmpty() && current.isEmpty()) return
+        L.i("候选状态清空（$why）")
+        current = emptyList()
+        engineIdx = emptyList()
+        pinyin = ""
+        sel = 0
+        listKey = ""
+        last = ""
+        loadingFrom = null
+        main.removeCallbacksAndMessages(loadToken)
+    }
+
     fun onSnapshot(args: Array<Any?>) {
         @Suppress("UNCHECKED_CAST")
         val raw = (args.firstOrNull { it is Array<*> && it.isArrayOf<String>() } as? Array<String>)?.toList() ?: return
