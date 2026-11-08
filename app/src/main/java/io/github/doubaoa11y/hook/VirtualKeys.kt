@@ -820,8 +820,14 @@ object VirtualKeys {
             y = vl[1] + k.rect.exactCenterY()
         }
         L.i("${if (action == MotionEvent.ACTION_UP) "松开" else "取消"}「${k.speakable()}」，按住 ${SystemClock.uptimeMillis() - holdDownTime} 毫秒${if (holdIsVoice) "，区域=$voiceZone" else ""}")
+        val cancelVoice = holdIsVoice && action == MotionEvent.ACTION_UP && voiceZone == "松手撤回输入"
         inject(v, holdDownTime, action, x, y)
         holdIsVoice = false
+        if (cancelVoice) try {
+            Voice.discard()
+        } catch (t: Throwable) {
+            L.hookError("Voice.discard", t)
+        }
     }
 
     private fun voiceShown(kb: View): Boolean {

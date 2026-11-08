@@ -46,9 +46,16 @@ object Voice {
     private var heldIc: InputConnection? = null
     private var flushing = false
     private val flushToken = Any()
+    private var dropUntil = 0L
 
     /** 输入连接的每个动作都先问这里；返回 true 表示拦下不执行 */
     fun intercept(name: String, ic: InputConnection, args: Array<Any?>): Boolean {
+        // 刚撤回：豆包晚到的中间结果也不写
+        if (!flushing && SystemClock.uptimeMillis() < dropUntil &&
+            (name == "setComposingText" || name == "setComposingRegion" || name == "setSelection")) {
+            L.i("撤回后拦下 $name")
+            return true
+        }
         if (flushing || !buffering) return false
         if (!Config.b("voiceBuffer")) {
             flush("设置已关")
@@ -119,6 +126,17 @@ object Voice {
         main.removeCallbacksAndMessages(flushToken)
     }
 
+    /** 松手撤回输入：留着的中间结果丢掉，不写进编辑框 */
+    fun discard() {
+        if (held != null) L.i("撤回输入，丢掉「$held」")
+        held = null
+        lastComposing = ""
+        spoken = true
+        dropUntil = if (buffering) SystemClock.uptimeMillis() + 1500 else 0L
+        main.removeCallbacksAndMessages(token)
+        end("撤回")
+    }
+
     /** 键盘收起、换输入框：把留着的写进去 */
     fun onInputEnd() {
         if (!buffering) return
@@ -129,6 +147,7 @@ object Voice {
     private fun onStart() {
         if (recording) return
         recording = true
+        dropUntil = 0L
         // 上一次（比如撤回输入）留下的“说完 3 秒写入”定时器要清掉，不然会在这次说话中途触发，提前结束
         main.removeCallbacksAndMessages(flushToken)
         // 上一次没收尾（多半是撤回输入）：留着的中间结果丢掉，不写进编辑框
