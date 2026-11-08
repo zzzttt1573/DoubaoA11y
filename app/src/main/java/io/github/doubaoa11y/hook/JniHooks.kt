@@ -43,6 +43,11 @@ object JniHooks {
             }))
         }
 
+        // 调试：豆包自己加载更多候选时的参数（Java 调原生的实例方法）
+        Hooker.byName(c, "onCandidateBarCandidateLoadMore", SafeHook("KeyboardJni.loadMore", before = { p ->
+            if (A11yState.recording && Config.b("logJni")) L.i("JNI onCandidateBarCandidateLoadMore ${Fmt.args(p.args)}")
+        }))
+
         // 候选栏更新：朗读第一个候选
         Hooker.byName(c, "notifyCandidateBarSnapshot", SafeHook("candidate.speak", after = { p ->
             Candidates.onSnapshot(p.args)
@@ -61,7 +66,7 @@ object JniHooks {
         }
     }
 
-    private fun jni(): Any? = try {
+    fun jni(): Any? = try {
         XposedHelpers.callStaticMethod(jniClass, "getKeyboardJni")
     } catch (t: Throwable) {
         L.hookError("getKeyboardJni", t)

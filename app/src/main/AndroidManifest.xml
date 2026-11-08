@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- 检查更新：连 GitHub 下载新版本，用系统安装器安装 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <!-- 需要能“看见”豆包输入法，才能给它发设置广播 -->
     <queries>
         <package android:name="com.bytedance.android.doubaoime" />
@@ -9,7 +13,7 @@
     <application
         android:allowBackup="false"
         android:label="@string/app_name"
-        android:theme="@android:style/Theme.DeviceDefault.Settings">
+        android:theme="@style/AppTheme">
 
         <activity
             android:name=".ui.SettingsActivity"

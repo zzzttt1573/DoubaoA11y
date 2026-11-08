@@ -37,6 +37,8 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+    // 使用帮助页显示整合包里的“使用说明.txt”
+    sourceSets.getByName("main").assets.srcDir("../package")
     packaging {
         resources.excludes += "META-INF/**"
     }

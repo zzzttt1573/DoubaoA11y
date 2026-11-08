@@ -6,12 +6,12 @@ package io.github.doubaoa11y
  */
 object ConfigSpec {
     /** 模块自己的版本（build.gradle.kts 从这里读） */
-    const val MODULE_VERSION_CODE = 41
-    const val MODULE_VERSION_NAME = "1.1.1"
+    const val MODULE_VERSION_CODE = 42
+    const val MODULE_VERSION_NAME = "1.1.2"
 
     const val TARGET_PACKAGE = "com.bytedance.android.doubaoime"
     /** 已适配的豆包版本：版本号 -> 版本名 */
-    val SUPPORTED_VERSIONS = mapOf(100503008L to "1.5.3", 100504010L to "1.5.4")
+    val SUPPORTED_VERSIONS = mapOf(100504010L to "1.5.4")
     val SUPPORTED_NAMES: String get() = SUPPORTED_VERSIONS.values.joinToString("、")
 
     /** 设置广播。extras：各开关的 boolean 值；可选 "cmd" = status / dump / reset。 */
@@ -22,22 +22,29 @@ object ConfigSpec {
     const val CMD_RESET = "reset"
     const val CMD_EDIT_ADD = "editAdd"
     const val CMD_EDIT_REMOVE = "editRemove"
+    /** 自定义解释词：每行“字<TAB>词”，读成“字，词的字” */
+    const val EXTRA_CUSTOM_WORDS = "customWords"
 
     /** 豆包进程里保存设置用的 SharedPreferences 文件名 */
     const val PREFS_NAME = "doubao_a11y_module"
 
     /** 设置页里的分组；FIXED 不显示，永远用默认值 */
-    enum class Group { INPUT, HOLD, CANDIDATE, STATE, VIBRATE, DEBUG, FIXED }
+    enum class Group { INPUT, HOLD, FAST, CANDIDATE, STATE, VIBRATE, DEBUG, FIXED }
 
-    class Item(val key: String, val label: String, val default: Boolean, val group: Group)
+    class Item(val key: String, val label: String, val default: Boolean, val group: Group, val hint: String = "")
 
     val items = listOf(
-        // 输入方式
-        Item("nineDigits", "九键拼音按键读数字（如 abc 键读 2）", false, Group.INPUT),
+        // 快速输入（触摸直接到键盘时）
+        Item("nativeSpace", "空格键改为豆包原生操作", false, Group.FAST,
+            "提示：豆包原生操作为：短按语音输入，空格上左右滑动可移动光标"),
+        Item("nativeDelete", "删除键改为豆包原生操作", false, Group.FAST,
+            "提示：豆包原生操作为：短按即可快速删除，按住左滑可以清空候选字"),
         // 候选词解释
-        Item("charExplain", "单字解释（如：高，提高的高）", true, Group.CANDIDATE),
+        Item("charExplain", "字词解释", true, Group.CANDIDATE),
+        Item("candidateNav", "逗号、句号切换候选", true, Group.CANDIDATE,
+            "提示：打拼音时逗号切到上一个候选，句号切到下一个，空格上屏"),
         // 键盘状态提示
-        Item("announceMode", "切换键盘、大小写时提示", true, Group.STATE),
+        Item("announceMode", "切换键盘类型、大小写状态时提示", false, Group.STATE),
         Item("announceOnShow", "键盘弹出时朗读键盘类型", false, Group.STATE),
         Item("announceHide", "键盘关闭时提示", true, Group.STATE),
         // 震动
@@ -66,6 +73,7 @@ object ConfigSpec {
         Item("tatansFast", "天坦读屏快速打字", true, Group.FIXED),
         Item("labelViews", "按钮中文名", true, Group.FIXED),
         Item("queryNative", "查询键盘类型", true, Group.FIXED),
+        Item("nineDigits", "九键拼音按键读数字（如 abc 键读 2）", true, Group.FIXED),
     )
 
     val defaults: Map<String, Boolean> = items.associate { it.key to it.default }
@@ -77,18 +85,18 @@ object ConfigSpec {
     /** 0.5 到 5 秒，0.1 秒一挡；值以毫秒保存 */
     private val holdOptions = (5..50).map { it * 100 to "${it / 10}.${it % 10} 秒" }
 
-    /** 输入方式：0 抬手输入（读屏焦点留在编辑框）；1 双击输入（按键交给读屏焦点，摸到读、双击输入） */
+    /** 输入方式：0 抬手输入（读屏焦点留在编辑框）；1 标准输入（按键交给读屏焦点，摸到读、双击输入） */
     const val TYPE_LIFT = 0
     const val TYPE_DOUBLE_TAP = 1
 
     val intItems = listOf(
         IntItem("typeMode", "输入方式", TYPE_LIFT, listOf(
-            TYPE_LIFT to "抬手输入", TYPE_DOUBLE_TAP to "双击输入",
+            TYPE_LIFT to "抬手输入", TYPE_DOUBLE_TAP to "标准输入",
         ), Group.INPUT),
         IntItem("deleteHoldMs", "删除键停留时间", 1500, holdOptions, Group.HOLD),
         IntItem("spaceHoldMs", "空格键停留时间", 1000, holdOptions, Group.HOLD),
-        IntItem("explainMaxLen", "逐字解释字数", 1, listOf(
-            1 to "1 个字", 2 to "2 个字", 3 to "3 个字", 4 to "4 个字", 5 to "5 个字", 0 to "全部",
+        IntItem("explainMaxLen", "逐字解释字数", 0, listOf(
+            0 to "全部", 1 to "1 个字", 2 to "2 个字", 3 to "3 个字", 4 to "4 个字", 5 to "5 个字",
         ), Group.CANDIDATE),
         IntItem("vibrateStrength", "震动强度", 2, listOf(1 to "轻", 2 to "中", 3 to "强"), Group.VIBRATE),
     )

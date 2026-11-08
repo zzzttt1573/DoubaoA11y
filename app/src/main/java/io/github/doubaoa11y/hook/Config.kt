@@ -37,6 +37,7 @@ object Config {
             for (item in ConfigSpec.intItems) {
                 ints[item.key] = p.getInt(item.key, item.default)
             }
+            customWords = parseWords(p.getString(ConfigSpec.EXTRA_CUSTOM_WORDS, null))
         } catch (t: Throwable) {
             L.e("读取设置失败，使用默认值", t)
         }
@@ -49,6 +50,32 @@ object Config {
             prefs?.edit()?.putBoolean(key, v)?.apply()
         } catch (t: Throwable) {
             L.e("保存设置失败", t)
+        }
+    }
+
+    /** 自定义解释词：字 -> 词 */
+    @Volatile
+    var customWords: Map<Char, String> = emptyMap()
+        private set
+
+    fun parseWords(s: String?): Map<Char, String> {
+        if (s.isNullOrBlank()) return emptyMap()
+        val m = HashMap<Char, String>()
+        for (line in s.split('\n')) {
+            val tab = line.indexOf('\t')
+            if (tab != 1) continue
+            val w = line.substring(2).trim()
+            if (w.isNotEmpty()) m[line[0]] = w
+        }
+        return m
+    }
+
+    fun setCustomWords(s: String) {
+        customWords = parseWords(s)
+        try {
+            prefs?.edit()?.putString(ConfigSpec.EXTRA_CUSTOM_WORDS, s)?.apply()
+        } catch (t: Throwable) {
+            L.e("保存自定义解释词失败", t)
         }
     }
 

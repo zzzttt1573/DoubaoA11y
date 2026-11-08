@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 安卓 15 起默认铺满全屏，内容会跑到标题栏下面被挡住；这里关掉 -->
+    <style name="AppTheme" parent="@android:style/Theme.DeviceDefault.Settings">
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
+    </style>
+</resources>

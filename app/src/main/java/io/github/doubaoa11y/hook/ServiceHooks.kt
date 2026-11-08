@@ -162,6 +162,8 @@ object ServiceHooks {
                     if (isOrderedBroadcast) {
                         resultCode = Activity.RESULT_OK
                         resultData = msg ?: if (cmd == null) "已保存" else shortStatus(ctx)
+                        // 豆包里正在运行的模块版本：设置页拿它和自己比，不一样就是更新后还没强行停止豆包
+                        setResultExtras(android.os.Bundle().apply { putInt("moduleVersion", ConfigSpec.MODULE_VERSION_CODE); putBoolean("active", VirtualKeys.enabled) })
                         L.i("状态：${status(ctx)}")
                     }
                 } catch (t: Throwable) {
@@ -190,6 +192,7 @@ object ServiceHooks {
             for (item in ConfigSpec.intItems) {
                 if (ex.containsKey(item.key)) Config.setInt(item.key, ex.getInt(item.key, item.default))
             }
+            if (ex.containsKey(ConfigSpec.EXTRA_CUSTOM_WORDS)) Config.setCustomWords(ex.getString(ConfigSpec.EXTRA_CUSTOM_WORDS) ?: "")
         }
         L.i("收到设置（cmd=$cmd）：${Config.summary()}")
         TatansBridge.refresh("设置变化")

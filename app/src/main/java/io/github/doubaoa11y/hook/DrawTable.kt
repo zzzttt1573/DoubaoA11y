@@ -56,18 +56,17 @@ class Key(val rect: Rect, val bg: DrawItem?, val labels: List<DrawItem>) {
         val others = labels.filter { it !== p && it.kind == DrawItem.Kind.TEXT }
             .mapNotNull { o ->
                 val n = labelName(o)
-                if (n.isBlank() || n == main) null
-                // 主标签上方的小字是上滑输入的字符
-                else if (o.cy() < p.cy() - 4 && o.size < p.size) "上滑$n" else n
+                // 主标签上方的小字是上滑输入的字符：读屏手势没法上滑输入，不读
+                if (n.isBlank() || n == main || (o.cy() < p.cy() - 4 && o.size < p.size)) null else n
             }
         return if (others.isEmpty()) main else main + "，" + others.joinToString("，")
     }
 
-    /** 九键拼音按数字读（设置里打开）：@# 读 1，ABC 读 2 …… WXYZ 读 9 */
+    /** 九键拼音按数字读（固定开）：@# 读“符号”，ABC 读 2 …… WXYZ 读 9 */
     private fun nineDigit(): String? {
         if (!Config.b("nineDigits") || KeyboardState.boardName != "九键拼音") return null
         return when (primary?.text?.trim()?.uppercase()) {
-            "@#" -> "1"
+            "@#" -> "符号"
             "ABC" -> "2"
             "DEF" -> "3"
             "GHI" -> "4"

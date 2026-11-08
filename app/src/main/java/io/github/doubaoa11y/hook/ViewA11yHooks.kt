@@ -138,13 +138,13 @@ object ViewA11yHooks {
             val t = v.text?.toString()?.trim()
             // 图标字体画的按钮（表情面板的删除等）：按图标表读
             if (!t.isNullOrEmpty() && t.any { Fmt.isPua(it) }) return IconNames.speakable(t).takeIf { it.isNotBlank() }
-            if (!t.isNullOrEmpty()) return if (cand) CharWords.explainWord(Names.spoken(t)) else Names.spoken(t)
+            if (!t.isNullOrEmpty()) return if (cand) CharWords.candidate(t) else Names.spoken(t)
         }
         if (v is ViewGroup) {
             val sb = StringBuilder()
             collectText(v, sb)
             val t = sb.toString().trim()
-            if (t.isNotEmpty()) return if (cand) CharWords.explainWord(Names.spoken(t)) else Names.spoken(t)
+            if (t.isNotEmpty()) return if (cand) CharWords.candidate(t) else Names.spoken(t)
         }
         return null
     }
@@ -201,8 +201,19 @@ object ViewA11yHooks {
             info.isVisibleToUser = false
             return
         }
-        val name = nameFor(v, info) ?: return
+        val name = nameFor(v, info) ?: candidateName(v, info) ?: return
         info.contentDescription = name
+    }
+
+    /** 双击模式下读屏直接读候选控件的节点：汉字候选加解释，符号读名称 */
+    private fun candidateName(v: View, info: AccessibilityNodeInfo): String? {
+        if (!isCandidate(v)) return null
+        if (!v.contentDescription.isNullOrBlank()) return null
+        val t = (info.text ?: (v as? android.widget.TextView)?.text)?.toString()?.trim()
+            ?: (v as? ViewGroup)?.let { g -> StringBuilder().also { collectText(g, it) }.toString().trim() }
+        if (t.isNullOrEmpty() || t.any { Fmt.isPua(it) }) return null
+        val s = CharWords.candidate(t)
+        return if (s != t) s else null
     }
 
     /** 没有名字、能点的子控件，外层 3 层内有能点的父控件 → 和父控件重复，隐藏 */

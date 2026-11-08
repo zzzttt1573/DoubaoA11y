@@ -136,7 +136,7 @@ object VirtualKeys {
             info.packageName = host.context.packageName
             info.className = KEY_CLASS
             info.setParent(host)
-            info.contentDescription = k.speakable()
+            info.contentDescription = Candidates.navName(k.mainName()) ?: k.speakable()
             info.setBoundsInParent(Rect(k.rect))
             val loc = IntArray(2)
             host.getLocationOnScreen(loc)
@@ -193,6 +193,11 @@ object VirtualKeys {
                     true
                 }
                 AccessibilityNodeInfo.ACTION_LONG_CLICK -> {
+                    if (k.mainName() == "空格" && Candidates.composing) {
+                        L.i("有候选，长按空格不开始语音，按一下空格")
+                        tap(host, k)
+                        return true
+                    }
                     L.i("长按按键「${k.speakable()}」")
                     press(host, k, NATIVE_LONG_PRESS_MS + 300)
                     true
@@ -215,7 +220,7 @@ object VirtualKeys {
         val e = obtain(type)
         e.packageName = host.context.packageName
         e.className = KEY_CLASS
-        e.contentDescription = k.speakable()
+        e.contentDescription = Candidates.navName(k.mainName()) ?: k.speakable()
         e.isEnabled = true
         e.setSource(host, id)
         send(host, e)
@@ -583,7 +588,7 @@ object VirtualKeys {
             v.getLocationOnScreen(loc)
             val slop = 12f * v.resources.displayMetrics.density
             val key = KeyboardViewHooks.tableOf(v)?.keyAt(rx - loc[0], ry - loc[1], slop) ?: return null
-            val name = key.speakable()
+            val name = Candidates.navName(key.mainName()) ?: key.speakable()
             return if (name.isBlank()) null else Target(v, key, null, name)
         }
         if (Panels.isPanel(v)) {
@@ -728,6 +733,8 @@ object VirtualKeys {
     private fun scheduleHold(v: View, k: Key) {
         val total = holdMsFor(k) ?: return
         if (!Config.b("liftToType")) return
+        // 有候选时空格是上屏用的，停留不开始语音
+        if (k.mainName() == "空格" && Candidates.composing) return
         val r = Runnable {
             holdRunnable = null
             try {
@@ -862,7 +869,11 @@ object VirtualKeys {
 
     // ---------------- 合成触摸 ----------------
 
-    private fun tap(v: View, k: Key) = press(v, k, 40)
+    private fun tap(v: View, k: Key) {
+        // 打拼音时逗号、句号切换候选，空格上屏选中的候选
+        if (Candidates.onKey(k.mainName())) return
+        press(v, k, 40)
+    }
 
     private fun press(v: View, k: Key, ms: Long) {
         val vl = IntArray(2)
@@ -902,7 +913,6 @@ object VirtualKeys {
      */
     fun onRootTouch(root: View, ev: MotionEvent): Boolean {
         if (!enabled || !touchMode || injecting) return false
-        // 删除和空格沿用豆包原来的触摸（长按连删、长按语音、空格滑动移光标等），整串触摸原样交给豆包
         if (ev.actionMasked == MotionEvent.ACTION_DOWN) {
             passThrough = false
             val loc = IntArray(2)
@@ -926,8 +936,12 @@ object VirtualKeys {
                 current = null
                 return false
             }
+            // 空格、删除默认由模块处理（摸到读、抬手输入、停留语音或连续删除）；
+            // 设置里改成豆包原生操作时，整串触摸交给豆包。用逗号句号选了别的候选时，空格仍由模块上屏那个候选
             val n = t?.key?.mainName()
-            if (n == "删除" || n == "空格") {
+            val native = (n == "空格" && Config.b("nativeSpace") && Candidates.sel <= 0) ||
+                (n == "删除" && Config.b("nativeDelete"))
+            if (native) {
                 passThrough = true
                 cancelHold()
                 current = null

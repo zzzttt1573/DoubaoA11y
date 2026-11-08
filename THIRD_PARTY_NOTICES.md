@@ -1,8 +1,23 @@
 # 第三方声明
 
+## NVDA 简体中文字符描述
+
+单字解释的词（“高，高低的高”）主要取自 NVDA 的简体中文字符描述文件 `source/locale/zh_CN/characterDescriptions.dic`，由 `tools/build_char_words.py` 转换并做了同音词筛选（有同音歧义的词换成 jieba 挑的词，他、她、它用固定读法）。
+
+- 项目：https://github.com/nvaccess/nvda （NonVisual Desktop Access）
+- 版权：Copyright (C) 2010-2025 NVDA Simplified Chinese team All volunteers
+- 许可：GNU General Public License 第 2 版或更高版本。本项目按 GPL-3.0 使用。
+
+## pypinyin
+
+`tools/build_char_words.py` 用 pypinyin 判断同音词（只在生成词表时用，不打包进应用）。
+
+- 项目：https://github.com/mozillazg/python-pinyin
+- 许可：MIT
+
 ## jieba 词典
 
-`app/src/main/java/io/github/doubaoa11y/hook/CharWordsData.kt`（单字解释用的“字 → 常见词”表）由 `tools/build_char_words.py` 从 jieba 分词自带的词频表 `dict.txt` 生成。
+`app/src/main/java/io/github/doubaoa11y/hook/CharWordsData.kt`（单字解释用的“字 → 常见词”表）里，NVDA 没有收录或有同音歧义的字，由 `tools/build_char_words.py` 从 jieba 分词自带的词频表 `dict.txt` 挑词。
 
 - 项目：https://github.com/fxsjy/jieba
 - 许可：MIT
