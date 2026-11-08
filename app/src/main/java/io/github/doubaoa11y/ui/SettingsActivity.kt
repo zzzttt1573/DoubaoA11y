@@ -41,6 +41,7 @@ class SettingsActivity : Activity() {
 
         /** 设置页自己保存的自定义解释词（和广播里的格式一样） */
         const val PREF_WORDS = ConfigSpec.EXTRA_CUSTOM_WORDS
+        const val LOG_SINCE = "runLogSince"
     }
 
     lateinit var prefs: SharedPreferences
@@ -54,6 +55,7 @@ class SettingsActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
+        autoOffLog()
         pad = (16 * resources.displayMetrics.density).toInt()
         page = intent.getStringExtra(EXTRA_PAGE) ?: HOME
         if (page == WORDS) WordsPage(this).show() else build()
@@ -69,6 +71,14 @@ class SettingsActivity : Activity() {
         super.onResume()
         // 使用须知还没同意时先不查状态，免得读屏读状态盖过须知
         if (page == HOME && Disclaimer.agreed(this)) send(ConfigSpec.CMD_STATUS)
+    }
+
+    /** “记录日志”开了 1 小时就关掉（豆包那边也会自己关，这里同步，免得打开设置页又把它打开） */
+    private fun autoOffLog() {
+        if (!prefs.getBoolean("runLog", false)) return
+        val since = prefs.getLong(LOG_SINCE, 0L)
+        if (since == 0L) prefs.edit().putLong(LOG_SINCE, System.currentTimeMillis()).apply()
+        else if (System.currentTimeMillis() - since > 60 * 60 * 1000L) prefs.edit().putBoolean("runLog", false).apply()
     }
 
     fun titleOf(p: String) = when (p) {
@@ -175,6 +185,7 @@ class SettingsActivity : Activity() {
                     Updater.forceStopDialog(this, "需要强行停止豆包输入法", msg)
                 }
             }
+            !prefs.getBoolean("moduleOn", true) -> fixButton?.visibility = View.GONE
             !active -> showFix("打开无障碍设置") {
                 try {
                     startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
@@ -188,6 +199,15 @@ class SettingsActivity : Activity() {
     // ---------------- 高级 ----------------
 
     private fun advanced(root: LinearLayout) {
+        addGroup(root, Group.MAIN)
+
+        root.addView(heading("问题反馈"))
+        root.addView(note("遇到问题时：1. 打开“记录日志”；2. 回去重现一次问题；3. 回到这里点“复制日志”粘贴发给作者，日志很长就点“保存日志文件”，在 QQ 里把文件发给作者。"))
+        addGroup(root, Group.LOG)
+        root.addView(button("复制日志") { send(ConfigSpec.CMD_LOG_COPY) })
+        root.addView(button("保存日志文件") { send(ConfigSpec.CMD_LOG_SAVE) })
+        root.addView(button("清空日志") { send(ConfigSpec.CMD_LOG_CLEAR) })
+
         root.addView(heading("调试选项"))
         val debug = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -253,7 +273,9 @@ class SettingsActivity : Activity() {
         isChecked = prefs.getBoolean(item.key, item.default)
         setPadding(0, pad / 2, 0, pad / 2)
         setOnCheckedChangeListener { _, checked ->
-            prefs.edit().putBoolean(item.key, checked).apply()
+            val e = prefs.edit().putBoolean(item.key, checked)
+            if (item.key == "runLog" && checked) e.putLong(LOG_SINCE, System.currentTimeMillis())
+            e.apply()
             send(null)
         }
     }
@@ -352,6 +374,12 @@ class SettingsActivity : Activity() {
                         st.text = "状态：$msg"
                         st.announceForAccessibility(msg)
                         if (ok) checkResult(getResultExtras(false))
+                    } else if (ok && cmd != null) {
+                        // 复制、保存日志这类命令：结果用对话框显示，读屏会读出来
+                        if (!isFinishing) AlertDialog.Builder(this@SettingsActivity)
+                            .setMessage(msg)
+                            .setPositiveButton("知道了", null)
+                            .show()
                     } else if (!ok) {
                         Toast.makeText(this@SettingsActivity, msg, Toast.LENGTH_LONG).show()
                     }

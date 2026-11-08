@@ -33,6 +33,12 @@ object ServiceHooks {
         Hooker.method(c, "onWindowShown", arrayOf(), SafeHook("onWindowShown", after = { _ ->
             L.i("键盘窗口显示（${A11yState.describe()}）")
             if (A11yState.recording) ViewA11yHooks.dumpTreeLater("键盘显示后")
+            // 豆包刚启动时键盘没切换过，收不到切换回调，不知道是九键还是全键：显示时查一次
+            if (KeyboardState.boardName.isEmpty() && Config.b("queryNative")) try {
+                JniHooks.queryBoardType("键盘切换后（首次显示）")
+            } catch (t: Throwable) {
+                L.hookError("queryBoardType", t)
+            }
             KeyboardState.onShown()
             TatansBridge.onShown()
             ViewA11yHooks.service?.window?.window?.decorView?.let { StretchPanel.watch(it) }
@@ -130,6 +136,7 @@ object ServiceHooks {
         val ctx = service.applicationContext ?: service
         appContext = ctx
         Config.load(ctx)
+        LogStore.init(ctx)
         Speaker.init(ctx)
         Haptic.init(ctx)
         A11yState.init(ctx)
@@ -138,6 +145,8 @@ object ServiceHooks {
         if (Config.b("traceAllJni")) JniHooks.installTraceAll()
         registerReceiver(ctx)
     }
+
+    fun versionLine(ctx: Context): String = versionInfo(ctx)
 
     private fun versionInfo(ctx: Context): String = try {
         val pi = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
@@ -157,6 +166,9 @@ object ServiceHooks {
                     val msg = when (cmd) {
                         ConfigSpec.CMD_EDIT_ADD -> EditHooks.setToolbar(true)
                         ConfigSpec.CMD_EDIT_REMOVE -> EditHooks.setToolbar(false)
+                        ConfigSpec.CMD_LOG_COPY -> LogStore.copy(ctx)
+                        ConfigSpec.CMD_LOG_SAVE -> LogStore.save(ctx)
+                        ConfigSpec.CMD_LOG_CLEAR -> LogStore.clear()
                         else -> null
                     }
                     if (isOrderedBroadcast) {
@@ -184,6 +196,7 @@ object ServiceHooks {
     private fun handle(intent: Intent) {
         val ex = intent.extras
         val cmd = intent.getStringExtra(ConfigSpec.EXTRA_CMD)
+        val logWasOn = Config.b("runLog")
         if (cmd == ConfigSpec.CMD_RESET) Config.reset()
         if (ex != null) {
             for (item in ConfigSpec.items) {
@@ -194,6 +207,7 @@ object ServiceHooks {
             }
             if (ex.containsKey(ConfigSpec.EXTRA_CUSTOM_WORDS)) Config.setCustomWords(ex.getString(ConfigSpec.EXTRA_CUSTOM_WORDS) ?: "")
         }
+        LogStore.onConfig(logWasOn)
         L.i("收到设置（cmd=$cmd）：${Config.summary()}")
         TatansBridge.refresh("设置变化")
         A11yState.refresh("设置变化")
@@ -221,7 +235,11 @@ object ServiceHooks {
         } catch (t: Throwable) {
             "豆包版本未知"
         }
-        val on = if (VirtualKeys.enabled) "模块已生效" else "模块已加载，但没有接管键盘（读屏没开）"
+        val on = when {
+            !A11yState.moduleOn -> "模块总开关已关，豆包输入法保持原样"
+            VirtualKeys.enabled -> "模块已生效"
+            else -> "模块已加载，但没有接管键盘（读屏没开）"
+        }
         return if (ver.startsWith("注意")) "$ver。$on。${A11yState.describeShort()}。"
         else "$on。$ver。${A11yState.describeShort()}。"
     }

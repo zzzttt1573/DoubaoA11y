@@ -6,8 +6,8 @@ package io.github.doubaoa11y
  */
 object ConfigSpec {
     /** 模块自己的版本（build.gradle.kts 从这里读） */
-    const val MODULE_VERSION_CODE = 43
-    const val MODULE_VERSION_NAME = "1.1.3"
+    const val MODULE_VERSION_CODE = 44
+    const val MODULE_VERSION_NAME = "1.1.4"
 
     const val TARGET_PACKAGE = "com.bytedance.android.doubaoime"
     /** 已适配的豆包版本：版本号 -> 版本名 */
@@ -22,6 +22,10 @@ object ConfigSpec {
     const val CMD_RESET = "reset"
     const val CMD_EDIT_ADD = "editAdd"
     const val CMD_EDIT_REMOVE = "editRemove"
+    /** 问题反馈：豆包把日志复制到剪贴板、存到“下载”文件夹、清空 */
+    const val CMD_LOG_COPY = "logCopy"
+    const val CMD_LOG_SAVE = "logSave"
+    const val CMD_LOG_CLEAR = "logClear"
     /** 自定义解释词：每行“字<TAB>词”，读成“字，词的字” */
     const val EXTRA_CUSTOM_WORDS = "customWords"
 
@@ -29,11 +33,19 @@ object ConfigSpec {
     const val PREFS_NAME = "doubao_a11y_module"
 
     /** 设置页里的分组；FIXED 不显示，永远用默认值 */
-    enum class Group { INPUT, HOLD, FAST, CANDIDATE, STATE, VIBRATE, DEBUG, FIXED }
+    enum class Group { MAIN, LOG, INPUT, HOLD, FAST, CANDIDATE, STATE, VIBRATE, DEBUG, FIXED }
 
     class Item(val key: String, val label: String, val default: Boolean, val group: Group, val hint: String = "")
 
     val items = listOf(
+        // 首页的总开关：关掉后模块什么都不做，豆包和没装模块一样
+        Item("moduleOn", "模块总开关", true, Group.MAIN,
+            "提示：这是整个模块的总开关，关闭后豆包输入法恢复官方原版方式，请谨慎关闭！"),
+        // 问题反馈
+        Item("runLog", "记录日志", false, Group.LOG,
+            "提示：打开 1 小时后自动关闭"),
+        Item("logText", "日志包含输入的文字", false, Group.LOG,
+            "提示：默认把打的字和语音识别的文字换成星号。排查语音、候选的问题时，作者可能会请你打开"),
         // 快速输入（触摸直接到键盘时）
         Item("nativeSpace", "空格键改为豆包原生操作", false, Group.FAST,
             "提示：豆包原生操作为：短按语音输入，空格上左右滑动可移动光标"),
@@ -50,7 +62,6 @@ object ConfigSpec {
         // 震动
         Item("touchVibrate", "触摸震动", true, Group.VIBRATE),
         // 调试
-        Item("runLog", "记录运行日志（会记下按键和语音文字，排查问题时才打开）", false, Group.DEBUG),
         Item("logDraw", "记录文字绘制", false, Group.DEBUG),
         Item("logRect", "记录按键背景", false, Group.DEBUG),
         Item("logOtherDraw", "记录图片和其他绘制", false, Group.DEBUG),

@@ -46,6 +46,11 @@ object L {
     }
 
     private fun out(level: Int, msg: String, toXposed: Boolean) {
+        try {
+            LogStore.add(when (level) { Log.ERROR -> 'E'; Log.WARN -> 'W'; Log.DEBUG -> 'D'; else -> 'I' }, msg)
+            if (level == Log.INFO) LogStore.checkAutoOff()
+        } catch (_: Throwable) {
+        }
         var start = 0
         while (start < msg.length) {
             val end = minOf(msg.length, start + CHUNK)
