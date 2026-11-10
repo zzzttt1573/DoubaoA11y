@@ -370,6 +370,8 @@ object VirtualKeys {
         }
         when (ev.actionMasked) {
             MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> {
+                // 手指落在缝里、下面什么都没有：16dp 以内找最近的键或按钮，读它、抬手也输入它
+                val t = t ?: if (missedAll) fallbackTarget(root, rx, ry) else null
                 if (t == null) {
                     // 手指只是稍微滑出一点（按钮之间的空隙、小图标边上），先不放掉，抬手照样算
                     val c = current
@@ -502,7 +504,12 @@ object VirtualKeys {
     private fun targetAt(root: View, rx: Float, ry: Float): Target? {
         inReaderPanel = false
         inHandwrite = false
-        val hit = findTop(root, rx, ry) ?: return null
+        missedAll = false
+        val hit = findTop(root, rx, ry)
+        if (hit == null) {
+            missedAll = true
+            return null
+        }
         if (hit === PANEL || hit === BLOCK) return null
         if (hit === HANDWRITE) {
             inHandwrite = true
@@ -531,6 +538,65 @@ object VirtualKeys {
         }
         val name = ViewA11yHooks.spokenName(v) ?: return null
         return Target(null, null, v, name)
+    }
+
+    /**
+     * 上一次 targetAt 什么都没找到（落在缝里）。被面板挡住（BLOCK）、交给读屏、
+     * 手写区、找到了但没名字的控件都不算，这些情况不兜底，免得读出被盖住的键。
+     */
+    private var missedAll = false
+
+    private const val FALLBACK_RADIUS_DP = 16f
+
+    /**
+     * 落指死区兜底：手指落在键与键、按钮与按钮之间的缝里时，在 16dp 以内找最近的目标。
+     * 键用 DrawTable.nearest 跨键盘视图找；按钮只找真正在外面（距离大于 0）的可点有名控件。
+     * 16dp 比键行距的一半小，不会跨行配错；更远的地方照旧不出声。
+     */
+    private fun fallbackTarget(root: View, rx: Float, ry: Float): Target? {
+        if (EditPanel.isOpen) return null
+        val radius = FALLBACK_RADIUS_DP * root.resources.displayMetrics.density
+        val quarter = root.width.toLong() * root.height / 4
+        var best: Target? = null
+        var bestD = Float.MAX_VALUE
+        fun walk(v: View, depth: Int) {
+            if (v.visibility != View.VISIBLE || v.alpha <= 0f) return
+            if (Panels.isPanel(v) || isHandwrite(v)) return
+            if (KeyboardViewHooks.kbClass?.isInstance(v) == true) {
+                if (!v.isShown) return
+                val loc = IntArray(2)
+                v.getLocationOnScreen(loc)
+                val hit = KeyboardViewHooks.tableOf(v)?.nearest(rx - loc[0], ry - loc[1], radius) ?: return
+                if (hit.second < bestD) {
+                    val name = Candidates.navName(hit.first.mainName()) ?: hit.first.speakable()
+                    if (name.isNotBlank()) {
+                        bestD = hit.second
+                        best = Target(v, hit.first, null, name)
+                    }
+                }
+                return
+            }
+            if ((v.isClickable || v.isLongClickable) && v.width.toLong() * v.height <= quarter) {
+                val loc = IntArray(2)
+                v.getLocationOnScreen(loc)
+                val dx = maxOf(0f, maxOf(loc[0] - rx, rx - (loc[0] + v.width)))
+                val dy = maxOf(0f, maxOf(loc[1] - ry, ry - (loc[1] + v.height)))
+                val d = kotlin.math.hypot(dx, dy)
+                if (d > 0f && d <= radius && d < bestD) {
+                    val name = ViewA11yHooks.spokenName(v)
+                    if (name != null) {
+                        bestD = d
+                        best = Target(null, null, v, name)
+                    }
+                }
+            }
+            if (v is android.view.ViewGroup && depth < 10) {
+                for (i in 0 until v.childCount) walk(v.getChildAt(i), depth + 1)
+            }
+        }
+        walk(root, 0)
+        best?.let { L.i("落在缝里，读最近的「${it.name}」 距 ${bestD.toInt()}px") }
+        return best
     }
 
     private fun onlyClickableChild(g: android.view.ViewGroup): View? {

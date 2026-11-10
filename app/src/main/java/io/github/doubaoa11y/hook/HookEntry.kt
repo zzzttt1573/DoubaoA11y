@@ -23,6 +23,8 @@ class HookEntry : IXposedHookLoadPackage {
             CustomToolbar.install()
             EditHooks.install(cl)
             StepSlider.install(cl)
+            // 豆包自己的设置页在 :Setting 进程，只在那里补开关、复选框、滑块的无障碍信息
+            if (lpparam.processName == ConfigSpec.TARGET_PACKAGE + ":Setting") NativeSettingsA11y.install(cl)
             L.i("hook 安装结束：${Hooker.summary()}")
             val d = Hooker.details()
             if (d.isNotBlank()) L.w("hook 问题明细：\n$d")

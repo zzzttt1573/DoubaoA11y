@@ -249,6 +249,17 @@ class DrawTable(var windowName: String) {
             .minByOrNull { it.second }?.first
     }
 
+    /**
+     * maxDist 以内最近的、有名字的键和它的距离，没有就返回 null。
+     * 给落指死区兜底用：手指落在键盘视图外面时 keyAt 根本不会被问到。距离一样时取小键。
+     */
+    fun nearest(x: Float, y: Float, maxDist: Float): Pair<Key, Float>? =
+        keys().filter { it.speakable().isNotBlank() }
+            .map { it to rectDist(it.rect, x, y) }
+            .filter { it.second <= maxDist }
+            .minWithOrNull(compareBy<Pair<Key, Float>> { it.second }
+                .thenBy { it.first.rect.width().toLong() * it.first.rect.height() })
+
     private fun rectDist(r: Rect, x: Float, y: Float): Float {
         val dx = max(0f, max(r.left - x, x - r.right))
         val dy = max(0f, max(r.top - y, y - r.bottom))
