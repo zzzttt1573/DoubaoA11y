@@ -47,8 +47,9 @@ object KeyboardState {
     private val speakOn: Boolean get() = VirtualKeys.enabled && Config.b("announceMode")
 
     fun nameOf(type: String?, kbd: Int?): String {
-        // 双拼的编号和全键拼音一样是 0，要看类型名（sp_input_xiaohe 等，按方案不同）
-        if (type != null && type.startsWith("sp_")) return "双拼键盘"
+        // 双拼的编号和全键拼音一样是 0，要看类型名（sp_input_xiaohe 等，按方案不同）。
+        // 只在编号是 0 时才按双拼：数字框里编号是 5（数字键盘），类型名却仍是双拼方案
+        if (type != null && type.startsWith("sp_") && (kbd == null || kbd == 0)) return "双拼键盘"
         return kbd?.let { kbdNames[it] } ?: type?.let { typeNames[it] } ?: ("键盘 " + (type ?: kbd ?: "未知"))
     }
 
@@ -87,10 +88,21 @@ object KeyboardState {
         say(shift, 0)
     }
 
+    /**
+     * 这次弹出后已经读过键盘类型。有的应用（如 Flutter）每输一个字都重新请求键盘，
+     * 收起又马上显示（80 毫秒内，不算真正收起），不再重复读，等真正收起后才清掉。
+     */
+    private var shownSaid = false
+
     /** 键盘弹出时（可选）读当前键盘 */
     fun onShown() {
         hideSaidAt = 0L
+        if (shownSaid) {
+            L.i("键盘没真正收起过，不重复读键盘类型")
+            return
+        }
         if (!speakOn || !Config.b("announceOnShow") || boardName.isEmpty()) return
+        shownSaid = true
         say(boardName, 300)
     }
 
@@ -98,6 +110,7 @@ object KeyboardState {
 
     /** 键盘收起时（可选）提示；立即读，不等。同一次收起几处都会调到，只读一次 */
     fun onHidden() {
+        shownSaid = false
         if (!VirtualKeys.enabled || !Config.b("announceHide")) return
         val now = SystemClock.uptimeMillis()
         if (now - hideSaidAt < 1500) return
