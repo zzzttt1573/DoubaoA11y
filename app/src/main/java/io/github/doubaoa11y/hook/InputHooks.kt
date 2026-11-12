@@ -40,6 +40,24 @@ object InputHooks {
             }))
     }
 
+    /**
+     * 豆包键盘里自带编辑框的输入连接：超级联想的指令框打开时，打字和语音写给它，
+     * 不经过 getCurrentInputConnection，要按类名单独 hook（说完再上屏才管得到）。
+     */
+    private val innerConnections = listOf(
+        "com.bytedance.android.input.keyboard.superassociation.SuperAssociationEditText\$b",
+    )
+
+    fun installInner(cl: ClassLoader) {
+        for (name in innerConnections) {
+            try {
+                Hooker.findClassQuiet(name, cl)?.let { hookClass(it) } ?: L.w("找不到键盘内编辑框的输入连接：$name")
+            } catch (t: Throwable) {
+                L.hookError("InputHooks.installInner", t)
+            }
+        }
+    }
+
     private fun hookClass(c: Class<*>) {
         if (!hookedClasses.add(c)) return
         L.i("输入连接类 ${c.name}，开始记录上屏")

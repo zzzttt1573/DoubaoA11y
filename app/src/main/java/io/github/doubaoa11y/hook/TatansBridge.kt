@@ -197,6 +197,10 @@ object TatansBridge {
                     val loc = IntArray(2)
                     area.getLocationOnScreen(loc)
                     want.set(loc[0], loc[1], loc[0] + area.width, loc[1] + area.height)
+                    // 工具栏上方（翻译栏、超级联想）用读屏焦点，不穿透：穿透从工具栏上边开始
+                    root?.let { VirtualKeys.toolbarTop(it) }?.let { top ->
+                        if (top > want.top && top < want.bottom) want.top = top
+                    }
                 }
             }
             if (want != current) send(want, why)

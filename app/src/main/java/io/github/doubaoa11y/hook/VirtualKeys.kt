@@ -111,8 +111,8 @@ object VirtualKeys {
             val info = AccessibilityNodeInfo.obtain(host)
             host.onInitializeAccessibilityNodeInfo(info)
             val ks = refreshKeys(host)
-            if (keepFocus) {
-                // 讯飞式：键盘对读屏不可见，焦点留在编辑框
+            if (liftFor(host)) {
+                // 讯飞式：键盘对读屏不可见，焦点留在编辑框（工具栏上方的翻译栏除外）
                 info.contentDescription = null
                 info.isVisibleToUser = false
                 info.removeAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_ACCESSIBILITY_FOCUS)
@@ -190,6 +190,7 @@ object VirtualKeys {
                     }
                     L.i("读屏点击按键「${k.speakable()}」")
                     tap(host, k)
+                    if (isFocusHost(host)) announceAfterClick(host)
                     true
                 }
                 AccessibilityNodeInfo.ACTION_LONG_CLICK -> {
@@ -231,6 +232,59 @@ object VirtualKeys {
     /** 讯飞式：读屏焦点留在编辑框，模块自己朗读、自己处理抬手 */
     val keepFocus: Boolean get() = Config.b("keepFocus") && Config.i("typeMode") != io.github.doubaoa11y.ConfigSpec.TYPE_DOUBLE_TAP
 
+    // ---------------- 工具栏上方：交给读屏焦点 ----------------
+    // 翻译栏、超级联想这类在工具栏上方的界面用读屏焦点操作（摸到读、双击执行），不用摸读抬手。
+    // 只在讯飞式、触摸浏览开着时这样做：触摸浏览关着时读屏没有焦点，照旧摸读。
+
+    private val focusAbove: Boolean get() = keepFocus && A11yState.active
+
+    private var barId = 0
+
+    /** 工具栏上边在屏幕上的纵坐标；工具栏不在就返回 null */
+    fun toolbarTop(root: View): Int? {
+        if (barId == 0) barId = root.resources.getIdentifier("native_candidate_bar", "id", root.context.packageName)
+        val bar = (if (barId != 0) root.findViewById<View>(barId) else null) ?: return null
+        if (!bar.isShown || bar.height <= 0) return null
+        val loc = IntArray(2)
+        bar.getLocationOnScreen(loc)
+        return loc[1]
+    }
+
+    /** 屏幕纵坐标 ry 在工具栏上方，交给读屏 */
+    private fun inFocusArea(root: View, ry: Float): Boolean =
+        focusAbove && toolbarTop(root)?.let { ry < it } == true
+
+    /** 这个自绘键盘整个在工具栏上方（翻译栏），它的按键报给读屏 */
+    private fun isFocusHost(v: View): Boolean {
+        if (!focusAbove) return false
+        val top = toolbarTop(v.rootView) ?: return false
+        val loc = IntArray(2)
+        v.getLocationOnScreen(loc)
+        return loc[1] + v.height <= top + 2
+    }
+
+    /** 这个自绘键盘由模块摸读抬手处理（不是的话按虚拟按键交给读屏） */
+    private fun liftFor(v: View): Boolean = keepFocus && !isFocusHost(v)
+
+    /**
+     * 工具栏上方双击按钮后，读出变了的按钮。
+     * 翻译栏切换语言时按钮本身读法不变，变的是输入框的提示（“输入要翻译的中文”变成“英文”），不读就没有提示。
+     */
+    private fun announceAfterClick(host: View) {
+        val before = state(host).keys.map { it.speakable() }
+        main.postDelayed({
+            try {
+                val changed = refreshKeys(host).map { it.speakable() }.filter { it !in before }
+                if (changed.isNotEmpty()) {
+                    L.i("双击后按钮变了：${changed.joinToString("，")}")
+                    Speaker.speak(changed.joinToString("，"))
+                }
+            } catch (t: Throwable) {
+                L.hookError("VirtualKeys.announceAfterClick", t)
+            }
+        }, 600)
+    }
+
     private var holdRunnable: Runnable? = null
     private var holding: Key? = null
     private var holdView: View? = null
@@ -243,13 +297,17 @@ object VirtualKeys {
 
     private fun speakKey(v: View, s: State, id: Int) {
         val k = s.keys.getOrNull(id) ?: return
-        if (keepFocus) Speaker.speak(k.speakable())
+        if (liftFor(v)) Speaker.speak(k.speakable())
         else sendKeyEvent(v, id, AccessibilityEvent.TYPE_VIEW_HOVER_ENTER)
     }
 
     /** 键盘视图上的悬停。返回 true 表示已处理，豆包原来的悬停逻辑不再执行 */
     fun onHover(v: View, ev: MotionEvent): Boolean? {
-        if (!enabled || keepFocus) return null
+        if (!enabled) return null
+        // 讯飞式下只有工具栏上方的翻译栏走这里（报虚拟按键给读屏），其余由根视图的摸读处理
+        val focusHost = keepFocus && isFocusHost(v)
+        if (keepFocus && !focusHost) return null
+        val lift = keepFocus && !focusHost
         val s = state(v)
         if (s.keys.isEmpty()) refreshKeys(v)
         val slop = 12f * v.resources.displayMetrics.density
@@ -265,23 +323,23 @@ object VirtualKeys {
                     val old = s.hovered
                     s.hovered = id
                     cancelHold()
-                    if (old != HOST && !keepFocus) sendKeyEvent(v, old, AccessibilityEvent.TYPE_VIEW_HOVER_EXIT)
+                    if (old != HOST && !lift) sendKeyEvent(v, old, AccessibilityEvent.TYPE_VIEW_HOVER_EXIT)
                     if (id != HOST) {
                         Haptic.tick()
                         speakKey(v, s, id)
-                        scheduleHold(v, s.keys[id])
+                        if (!focusHost) scheduleHold(v, s.keys[id])
                     }
                 }
             }
             MotionEvent.ACTION_HOVER_EXIT -> {
                 val old = s.hovered
                 s.hovered = HOST
-                if (old != HOST && !keepFocus) sendKeyEvent(v, old, AccessibilityEvent.TYPE_VIEW_HOVER_EXIT)
+                if (old != HOST && !lift) sendKeyEvent(v, old, AccessibilityEvent.TYPE_VIEW_HOVER_EXIT)
                 cancelHold()
                 val inside = ev.x >= 0 && ev.y >= 0 && ev.x < v.width && ev.y < v.height
                 val k = s.keys.getOrNull(old)
                 // 只有讯飞式由模块抬手输入；虚拟按键式由读屏自己在抬手时点击
-                if (keepFocus && inside && k != null && key != null && key.rect == k.rect) {
+                if (lift && inside && k != null && key != null && key.rect == k.rect) {
                     L.i("抬手输入「${k.speakable()}」")
                     tap(v, k)
                 }
@@ -361,6 +419,13 @@ object VirtualKeys {
     private var current: Target? = null
 
     private fun explore(root: View, ev: MotionEvent, rx: Float, ry: Float): Boolean {
+        if (inFocusArea(root, ry)) {
+            // 工具栏上方（翻译栏、超级联想）：交给读屏焦点，模块不读、抬手不输入
+            if (current != null) L.i("手指到了工具栏上方，交给读屏")
+            cancelHold()
+            current = null
+            return false
+        }
         val t = targetAt(root, rx, ry)
         if (inReaderPanel) {
             // 豆包菜单这类界面交给读屏
@@ -559,6 +624,8 @@ object VirtualKeys {
         val quarter = root.width.toLong() * root.height / 4
         var best: Target? = null
         var bestD = Float.MAX_VALUE
+        // 工具栏上方交给读屏的东西不拿来兜底
+        val barTop = if (focusAbove) toolbarTop(root) else null
         fun walk(v: View, depth: Int) {
             if (v.visibility != View.VISIBLE || v.alpha <= 0f) return
             if (Panels.isPanel(v) || isHandwrite(v)) return
@@ -566,6 +633,7 @@ object VirtualKeys {
                 if (!v.isShown) return
                 val loc = IntArray(2)
                 v.getLocationOnScreen(loc)
+                if (barTop != null && loc[1] + v.height <= barTop + 2) return
                 val hit = KeyboardViewHooks.tableOf(v)?.nearest(rx - loc[0], ry - loc[1], radius) ?: return
                 if (hit.second < bestD) {
                     val name = Candidates.navName(hit.first.mainName()) ?: hit.first.speakable()
@@ -579,6 +647,7 @@ object VirtualKeys {
             if ((v.isClickable || v.isLongClickable) && v.width.toLong() * v.height <= quarter) {
                 val loc = IntArray(2)
                 v.getLocationOnScreen(loc)
+                if (barTop != null && loc[1] + v.height <= barTop) return
                 val dx = maxOf(0f, maxOf(loc[0] - rx, rx - (loc[0] + v.width)))
                 val dy = maxOf(0f, maxOf(loc[1] - ry, ry - (loc[1] + v.height)))
                 val d = kotlin.math.hypot(dx, dy)
@@ -595,9 +664,16 @@ object VirtualKeys {
             }
         }
         walk(root, 0)
-        best?.let { L.i("落在缝里，读最近的「${it.name}」 距 ${bestD.toInt()}px") }
-        return best
+        val b = best
+        // 手指在缝里移动时每一下都会来，只在换了目标时记一行
+        if (b?.name != lastFallback) {
+            lastFallback = b?.name
+            if (b != null) L.i("落在缝里，读最近的「${b.name}」 距 ${bestD.toInt()}px")
+        }
+        return b
     }
+
+    private var lastFallback: String? = null
 
     private fun onlyClickableChild(g: android.view.ViewGroup): View? {
         var found: View? = null

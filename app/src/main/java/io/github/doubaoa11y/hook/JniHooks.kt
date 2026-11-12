@@ -53,8 +53,17 @@ object JniHooks {
             Candidates.onSnapshot(p.args)
         }))
 
-        // 键盘类型切换：真正的处理被 post 到主线程，处理完再查询类型
-        val queried = Hooker.byName(c, "lambda\$onKeyboardBoardTypeChanged\$49", SafeHook("boardTypeChanged.lambda", after = { _ ->
+        // 键盘类型切换：真正的处理被 post 到主线程，处理完再查询类型。
+        // 这个 lambda 的编号随豆包版本变：1.5.4 是 $49，1.5.5 是 $51，豆包里有哪个就钩哪个
+        val declared = try {
+            c.declaredMethods.map { it.name }.toSet()
+        } catch (t: Throwable) {
+            L.hookError("boardTypeChanged.names", t)
+            emptySet()
+        }
+        val lambdaName = listOf("lambda\$onKeyboardBoardTypeChanged\$49", "lambda\$onKeyboardBoardTypeChanged\$51")
+            .firstOrNull { it in declared }
+        val queried = lambdaName != null && Hooker.byName(c, lambdaName, SafeHook("boardTypeChanged.lambda", after = { _ ->
             if (A11yState.recording && Config.b("queryNative")) queryBoardType("键盘切换后")
             if (A11yState.recording) ViewA11yHooks.dumpTreeLater("键盘切换后")
         }))

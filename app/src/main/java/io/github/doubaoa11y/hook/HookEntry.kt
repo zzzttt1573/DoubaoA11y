@@ -17,6 +17,7 @@ class HookEntry : IXposedHookLoadPackage {
             JniHooks.install(cl)
             ServiceHooks.install(cl)
             InputHooks.install()
+            InputHooks.installInner(cl)
             ViewA11yHooks.install()
             Voice.install()
             Candidates.install()

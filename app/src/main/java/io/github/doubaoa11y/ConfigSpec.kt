@@ -11,7 +11,7 @@ object ConfigSpec {
 
     const val TARGET_PACKAGE = "com.bytedance.android.doubaoime"
     /** 已适配的豆包版本：版本号 -> 版本名 */
-    val SUPPORTED_VERSIONS = mapOf(100504010L to "1.5.4")
+    val SUPPORTED_VERSIONS = mapOf(100504010L to "1.5.4", 100505010L to "1.5.5")
     val SUPPORTED_NAMES: String get() = SUPPORTED_VERSIONS.values.joinToString("、")
 
     /** 设置广播。extras：各开关的 boolean 值；可选 "cmd" = status / dump / reset。 */

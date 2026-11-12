@@ -48,6 +48,12 @@ object Voice {
     private val flushToken = Any()
     private var dropUntil = 0L
 
+    /**
+     * 翻译模式：豆包把原文的中间结果写进编辑框，说完后自己再把原文写一遍、换成译文。
+     * 中间结果和框组字区都拦下，拦着的原文一律丢掉、不写进去（写了会留在编辑框里和译文混在一起）。
+     */
+    private var translateMode = false
+
     /** 输入连接的每个动作都先问这里；返回 true 表示拦下不执行 */
     fun intercept(name: String, ic: InputConnection, args: Array<Any?>): Boolean {
         // 刚撤回：豆包晚到的中间结果也不写
@@ -63,7 +69,14 @@ object Voice {
         }
         when (name) {
             "setComposingText" -> {
-                held = args[0]?.toString() ?: ""
+                val t = args[0]?.toString() ?: ""
+                if (translateMode && !recording && t.isEmpty()) {
+                    L.i("翻译模式：丢掉原文「${held ?: ""}」，等译文")
+                    held = null
+                    end("译文")
+                    return false
+                }
+                held = t
                 heldIc = ic
                 if (!recording) scheduleFlush()
                 return true
@@ -107,6 +120,11 @@ object Voice {
         val t = held ?: return
         val ic = heldIc
         held = null
+        // 翻译模式：豆包出译文前会自己把原文再写一遍、再换成译文；这里写进去原文就留在编辑框里，和译文混在一起
+        if (translateMode) {
+            L.i("翻译模式：丢掉原文「$t」，等译文（$why）")
+            return
+        }
         if (ic == null) return
         try {
             flushing = true
@@ -154,12 +172,13 @@ object Voice {
         if (buffering && held != null) L.i("新一次语音，丢掉上次没上屏的「$held」")
         end("新一次语音")
         held = null
-        // 翻译模式下豆包靠组字区域把原文换成译文，拦了会留下原文、吞掉一部分，所以不拦
+        // 翻译模式下豆包靠组字区域把原文换成译文：原文先拦下，等豆包清空组字时丢掉，让译文写进去
         val translating = KeyboardViewHooks.translateShown || translateViewShown()
-        if (translating) L.i("翻译模式，语音不做说完再上屏")
-        if (Config.b("voiceBuffer") && A11yState.recording && !translating) {
+        translateMode = translating
+        if (Config.b("voiceBuffer") && A11yState.recording) {
             buffering = true
             held = null
+            if (translating) L.i("翻译模式：说完再上屏，等译文")
         }
         lastComposing = ""
         spoken = false
