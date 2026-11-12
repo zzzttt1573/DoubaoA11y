@@ -26,12 +26,22 @@ import android.view.accessibility.AccessibilityManager
  *   收到手指触摸就按触摸浏览关闭处理，收到悬停就按原来的触摸浏览处理。穿透没生效也不会摸不到键。
  *
  * 接口是按天坦读屏对外提供的绑定动作和方法编号调用的，没有用天坦的代码。
+ *
+ * 解说（com.nirenr.talkman）也支持同样的效果，但接口不同：它对外开放了一个广播，
+ * 输入法显示时发 ACTION_INPUTMETHOD_SHOW 带上键盘区域，解说就把这块设为触摸浏览穿透；
+ * 收起时发 ACTION_INPUTMETHOD_HIDE 撤掉。解说接天坦输入法用的是另一套（解说主动绑定 com.tatans.inputmethod），
+ * 只认天坦输入法的包名，豆包用不了，所以这里走广播。
  */
 object TatansBridge {
     private const val PKG = "com.android.tback"
     private const val ACTION = "tatans.intent.action.IME_SERVICE"
     private const val DESCRIPTOR = "net.tatans.soundback.ITatansImeService"
     private const val TX_SET_PASS_THROUGH = 3
+
+    private const val TALKMAN = "com.nirenr.talkman"
+    private const val TALKMAN_SHOW = "com.nirenr.talkman.ACTION_INPUTMETHOD_SHOW"
+    private const val TALKMAN_HIDE = "com.nirenr.talkman.ACTION_INPUTMETHOD_HIDE"
+    private const val TALKMAN_RECT = "com.nirenr.talkman.EXTRA_RECT_DATA"
 
     private val main = Handler(Looper.getMainLooper())
     private var remote: IBinder? = null
@@ -40,11 +50,13 @@ object TatansBridge {
     private var binding = false
     private var bound = false
     private val current = Rect()
+    /** 已经发给解说的穿透区域 */
+    private val talkmanCurrent = Rect()
     /** 键盘窗口显示着（收起动画期间也算收起） */
     private var visible = false
 
     /** 已经请求天坦把键盘区域设为穿透（手指触摸可能直接到输入法） */
-    val requested: Boolean get() = remote != null && !current.isEmpty
+    val requested: Boolean get() = (remote != null && !current.isEmpty) || !talkmanCurrent.isEmpty
 
     private val conn = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -86,23 +98,25 @@ object TatansBridge {
         val SDK = android.os.Build.VERSION.SDK_INT
     }
 
-    /** 天坦读屏是不是正在运行的读屏 */
-    private fun tatansRunning(): Boolean {
+    /** 这个包的读屏是不是正在运行 */
+    private fun running(pkg: String): Boolean {
         try {
             val list = am?.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
-            if (list != null && list.any { it.resolveInfo?.serviceInfo?.packageName == PKG }) return true
+            if (list != null && list.any { it.resolveInfo?.serviceInfo?.packageName == pkg }) return true
         } catch (_: Throwable) {
         }
         // 软件包可见性可能让上面查不到，再看系统设置里启用的服务
         return try {
             val s = Settings.Secure.getString(ctx?.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
-            s.split(':').any { it.startsWith("$PKG/") }
+            s.split(':').any { it.startsWith("$pkg/") }
         } catch (_: Throwable) {
             false
         }
     }
 
-    private fun wanted(): Boolean = Config.b("tatansFast") && A11yState.active && tatansRunning()
+    private fun wanted(): Boolean = Config.b("tatansFast") && A11yState.active && running(PKG)
+
+    private fun talkmanWanted(): Boolean = Config.b("tatansFast") && A11yState.active && running(TALKMAN)
 
     /** 读屏状态、设置变化后：该连就连，不该连就撤掉穿透并断开 */
     fun refresh(why: String) {
@@ -114,6 +128,12 @@ object TatansBridge {
                 L.i("天坦读屏不在运行或快速打字已关（$why），撤掉穿透")
                 send(Rect(), why)
                 disconnect()
+            }
+            if (talkmanWanted()) {
+                update(why)
+            } else if (!talkmanCurrent.isEmpty) {
+                L.i("解说不在运行或快速打字已关（$why），撤掉穿透")
+                sendTalkman(Rect(), why)
             }
         } catch (t: Throwable) {
             L.hookError("TatansBridge.refresh", t)
@@ -170,6 +190,7 @@ object TatansBridge {
     fun onHidden() {
         visible = false
         send(Rect(), "键盘收起")
+        if (!talkmanCurrent.isEmpty) sendTalkman(Rect(), "键盘收起")
     }
 
     private fun imeRoot(): View? = try {
@@ -183,7 +204,13 @@ object TatansBridge {
         CustomToolbar.editing() || imeRoot()?.let { Panels.find(it) } != null
 
     fun update(why: String) {
-        if (remote == null) return
+        val tatans = remote != null
+        val talkman = try {
+            talkmanWanted()
+        } catch (_: Throwable) {
+            false
+        }
+        if (!tatans && !talkman) return
         try {
             val want = Rect()
             // 双击输入时按键交给读屏焦点，不穿透
@@ -203,9 +230,25 @@ object TatansBridge {
                     }
                 }
             }
-            if (want != current) send(want, why)
+            if (tatans && want != current) send(want, why)
+            if (talkman && want != talkmanCurrent) sendTalkman(want, why)
         } catch (t: Throwable) {
             L.hookError("TatansBridge.update", t)
+        }
+    }
+
+    /** 解说：广播键盘区域（空区域就撤掉穿透） */
+    private fun sendTalkman(r: Rect, why: String) {
+        val c = ctx ?: return
+        try {
+            val i = if (r.isEmpty) Intent(TALKMAN_HIDE)
+            else Intent(TALKMAN_SHOW).putExtra(TALKMAN_RECT, Rect(r))
+            c.sendBroadcast(i.setPackage(TALKMAN))
+            talkmanCurrent.set(r)
+            L.i("解说触摸穿透（$why）：${if (r.isEmpty) "撤掉" else Fmt.rect(r)}")
+        } catch (t: Throwable) {
+            talkmanCurrent.setEmpty()
+            L.e("设置解说触摸穿透失败", t)
         }
     }
 
