@@ -54,11 +54,13 @@ object ConfigSpec {
         // 候选词解释
         Item("charExplain", "字词解释", true, Group.CANDIDATE),
         Item("candidateNav", "逗号、句号切换候选", true, Group.CANDIDATE,
-            "提示：打拼音时逗号切到上一个候选，句号切到下一个，空格上屏"),
+            "提示：打拼音时逗号左移、句号右移候选，九键拼音上空格左边的 123 键左移、右边的中英切换键右移，空格上屏"),
         // 键盘状态提示
         Item("announceMode", "切换键盘类型、大小写状态时提示", false, Group.STATE),
         Item("announceOnShow", "键盘弹出时朗读键盘类型", false, Group.STATE),
         Item("announceHide", "键盘关闭时提示", true, Group.STATE),
+        Item("voiceZoneHint", "语音输入操作提示", true, Group.STATE,
+            "提示：长按空格时左上滑动取消输入，右上滑直接发送。"),
         // 震动
         Item("touchVibrate", "触摸震动", true, Group.VIBRATE),
         // 调试

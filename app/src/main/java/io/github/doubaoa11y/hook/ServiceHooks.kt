@@ -44,7 +44,6 @@ object ServiceHooks {
             TatansBridge.onShown()
             ViewA11yHooks.service?.window?.window?.decorView?.let { StretchPanel.watch(it) }
             windowShown = true
-            warnVersionOnce()
             if (A11yState.recording && KeyboardViewHooks.isEmpty()) KeyboardViewHooks.requestFullRedraw("键盘显示时键位表为空")
         }))
         Hooker.method(c, "onWindowHidden", arrayOf(), SafeHook("onWindowHidden", after = { _ ->
@@ -60,25 +59,6 @@ object ServiceHooks {
     }
 
     private var windowShown = false
-
-    /** 豆包版本和适配版本不同时，第一次弹出键盘读一次提醒；同一个版本只提醒一次 */
-    private fun warnVersionOnce() {
-        val ctx = appContext ?: return
-        try {
-            val pi = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
-            val code = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode else @Suppress("DEPRECATION") pi.versionCode.toLong()
-            if (code in ConfigSpec.SUPPORTED_VERSIONS || !VirtualKeys.enabled) return
-            val p = ctx.getSharedPreferences(ConfigSpec.PREFS_NAME, Context.MODE_PRIVATE)
-            if (p.getLong("warnedVersion", 0L) == code) return
-            p.edit().putLong("warnedVersion", code).apply()
-            L.w("豆包版本 ${pi.versionName}（$code）与适配版本不同，已提醒")
-            main.postDelayed({
-                Speaker.speak("注意：豆包输入法已更新到 ${pi.versionName}，无障碍模块适配的是 ${ConfigSpec.SUPPORTED_NAMES}，部分功能可能失效")
-            }, 1200)
-        } catch (t: Throwable) {
-            L.e("检查版本失败", t)
-        }
-    }
 
     private val main = android.os.Handler(android.os.Looper.getMainLooper())
     private var pendingHide: Runnable? = null
@@ -232,18 +212,17 @@ object ServiceHooks {
         val ver = try {
             val pi = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
             val code = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode else @Suppress("DEPRECATION") pi.versionCode.toLong()
-            if (code in ConfigSpec.SUPPORTED_VERSIONS) "豆包输入法 ${pi.versionName}，版本匹配"
-            else "注意：豆包输入法是 ${pi.versionName}，版本不匹配，模块适配 ${ConfigSpec.SUPPORTED_NAMES}，部分功能可能失效"
+            if (code in ConfigSpec.SUPPORTED_VERSIONS) ""
+            else "当前豆包输入法版本 ${pi.versionName}，无障碍未测试该版本，可能有兼容问题。"
         } catch (t: Throwable) {
-            "豆包版本未知"
+            ""
         }
         val on = when {
             !A11yState.moduleOn -> "模块总开关已关，豆包输入法保持原样"
             VirtualKeys.enabled -> "模块已生效"
             else -> "模块已加载，但没有接管键盘（读屏没开）"
         }
-        return if (ver.startsWith("注意")) "$ver。$on。${A11yState.describeShort()}。"
-        else "$on。$ver。${A11yState.describeShort()}。"
+        return "$on。${A11yState.describeShort()}。$ver"
     }
 
     fun status(ctx: Context): String =

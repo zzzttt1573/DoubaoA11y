@@ -136,7 +136,7 @@ object VirtualKeys {
             info.packageName = host.context.packageName
             info.className = KEY_CLASS
             info.setParent(host)
-            info.contentDescription = Candidates.navName(k.mainName()) ?: k.speakable()
+            info.contentDescription = Candidates.navName(k) ?: k.speakable()
             info.setBoundsInParent(Rect(k.rect))
             val loc = IntArray(2)
             host.getLocationOnScreen(loc)
@@ -221,7 +221,7 @@ object VirtualKeys {
         val e = obtain(type)
         e.packageName = host.context.packageName
         e.className = KEY_CLASS
-        e.contentDescription = Candidates.navName(k.mainName()) ?: k.speakable()
+        e.contentDescription = Candidates.navName(k) ?: k.speakable()
         e.isEnabled = true
         e.setSource(host, id)
         send(host, e)
@@ -636,7 +636,7 @@ object VirtualKeys {
                 if (barTop != null && loc[1] + v.height <= barTop + 2) return
                 val hit = KeyboardViewHooks.tableOf(v)?.nearest(rx - loc[0], ry - loc[1], radius) ?: return
                 if (hit.second < bestD) {
-                    val name = Candidates.navName(hit.first.mainName()) ?: hit.first.speakable()
+                    val name = Candidates.navName(hit.first) ?: hit.first.speakable()
                     if (name.isNotBlank()) {
                         bestD = hit.second
                         best = Target(v, hit.first, null, name)
@@ -730,7 +730,7 @@ object VirtualKeys {
             v.getLocationOnScreen(loc)
             val slop = 12f * v.resources.displayMetrics.density
             val key = KeyboardViewHooks.tableOf(v)?.keyAt(rx - loc[0], ry - loc[1], slop) ?: return null
-            val name = Candidates.navName(key.mainName()) ?: key.speakable()
+            val name = Candidates.navName(key) ?: key.speakable()
             return if (name.isBlank()) null else Target(v, key, null, name)
         }
         if (Panels.isPanel(v)) {
@@ -1001,7 +1001,7 @@ object VirtualKeys {
         if (zone != voiceZone) {
             val first = voiceZone.isEmpty()
             voiceZone = zone
-            if (!first) Speaker.speak(zone)
+            if (!first && Config.b("voiceZoneHint")) Speaker.speak(zone)
             L.i("语音区域：$zone")
         }
     }
@@ -1019,7 +1019,7 @@ object VirtualKeys {
 
     private fun tap(v: View, k: Key) {
         // 打拼音时逗号、句号切换候选，空格上屏选中的候选
-        if (Candidates.onKey(k.mainName())) return
+        if (Candidates.onKey(k)) return
         press(v, k, 40)
     }
 
@@ -1063,6 +1063,7 @@ object VirtualKeys {
         if (!enabled || !touchMode || injecting) return false
         if (ev.actionMasked == MotionEvent.ACTION_DOWN) {
             passThrough = false
+            nativeVoiceKb = null
             val loc = IntArray(2)
             root.getLocationOnScreen(loc)
             downX = ev.x
@@ -1093,13 +1094,32 @@ object VirtualKeys {
                 passThrough = true
                 cancelHold()
                 current = null
+                if (n == "空格") {
+                    nativeVoiceKb = t?.kb
+                    voiceZone = ""
+                }
                 Speaker.speak(n)
                 L.i("直接触摸：$n 交给豆包原来的处理")
                 return false
             }
         }
         if (passThrough) {
-            if (ev.actionMasked == MotionEvent.ACTION_UP || ev.actionMasked == MotionEvent.ACTION_CANCEL) passThrough = false
+            nativeVoiceKb?.let { kb ->
+                // 空格交给豆包时也跟着语音区域：豆包撤回了，模块留着的中间结果也要丢掉，不然 3 秒后会上屏
+                if (ev.actionMasked == MotionEvent.ACTION_MOVE) checkVoiceZone(kb)
+                if (ev.actionMasked == MotionEvent.ACTION_UP) {
+                    checkVoiceZone(kb)
+                    if (voiceZone == "松手撤回输入") {
+                        L.i("原生空格：松手撤回输入")
+                        Voice.discard()
+                    }
+                }
+            }
+            if (ev.actionMasked == MotionEvent.ACTION_UP || ev.actionMasked == MotionEvent.ACTION_CANCEL) {
+                passThrough = false
+                nativeVoiceKb = null
+                voiceZone = ""
+            }
             return false
         }
 
@@ -1124,6 +1144,8 @@ object VirtualKeys {
     }
 
     private var passThrough = false
+    /** 空格交给豆包原生处理时的键盘视图，用来跟踪语音长按界面的区域 */
+    private var nativeVoiceKb: View? = null
     private var lastViewTap = 0L
 
     // 触摸浏览关着时的横向滑动（候选栏左右翻）：按下时记下来，滑得快就整串交给豆包

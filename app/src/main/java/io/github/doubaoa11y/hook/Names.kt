@@ -36,7 +36,7 @@ object Names {
         val t = s.trim()
         if (Config.b("editPanel")) {
             if (t == "移动光标") return "编辑面板（原移动光标）"
-            if (t == "单手模式") return "编辑面板（原单手模式）"
+            if (t == "单手模式") return "编辑模式"
         }
         punct[t]?.let { return it }
         return t

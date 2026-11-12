@@ -36,25 +36,40 @@ object Candidates {
 
     private val navOn: Boolean get() = VirtualKeys.enabled && Config.b("candidateNav") && composing
 
-    /** 有候选时逗号、句号键的读法；不是这两个键返回 null */
-    fun navName(mainName: String): String? {
-        if (!navOn) return null
-        return when (mainName) {
-            "逗号" -> "上一个候选"
-            "句号" -> "下一个候选"
-            else -> null
+    /**
+     * 有候选时哪些键用来左移、右移候选：逗号、句号；九键拼音上空格左边的 123 键和右边的中英切换键。
+     * 返回 -1 左移，1 右移，0 不是这些键。
+     */
+    private fun navDir(k: Key): Int {
+        if (!navOn) return 0
+        val m = k.mainName()
+        when (m) {
+            "逗号" -> return -1
+            "句号" -> return 1
         }
+        if (KeyboardState.boardName == "九键拼音") {
+            if (m == "123") return -1
+            if (m == "中" || k.speakable() == "英文键盘") return 1
+        }
+        return 0
+    }
+
+    /** 有候选时左移、右移键的读法；不是这些键返回 null */
+    fun navName(k: Key): String? = when (navDir(k)) {
+        -1 -> "左移"
+        1 -> "右移"
+        else -> null
     }
 
     /** 抬手（或双击）输入一个键之前问这里；返回 true 表示模块已处理，不再把键交给豆包 */
-    fun onKey(mainName: String): Boolean {
+    fun onKey(k: Key): Boolean {
         if (!navOn) return false
-        return when (mainName) {
-            "逗号" -> { move(-1); true }
-            "句号" -> { move(1); true }
-            "空格" -> commitSelected()
-            else -> false
+        val d = navDir(k)
+        if (d != 0) {
+            move(d)
+            return true
         }
+        return k.mainName() == "空格" && commitSelected()
     }
 
     /** 候选栏快照序号（notifyCandidateBarSnapshot 第 1 个参数），加载更多时交给豆包 */
