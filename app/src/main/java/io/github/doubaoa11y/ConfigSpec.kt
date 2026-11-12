@@ -83,7 +83,7 @@ object ConfigSpec {
         Item("speakCandidate", "朗读第一个候选", true, Group.FIXED),
         Item("editPanel", "编辑面板", true, Group.FIXED),
         Item("voiceBuffer", "语音说完再上屏", true, Group.FIXED),
-        Item("tatansFast", "天坦读屏快速打字", true, Group.FIXED),
+        Item("tatansFast", "快速打字", true, Group.FIXED),
         Item("labelViews", "按钮中文名", true, Group.FIXED),
         Item("queryNative", "查询键盘类型", true, Group.FIXED),
         Item("nineDigits", "九键拼音按键读数字（如 abc 键读 2）", true, Group.FIXED),

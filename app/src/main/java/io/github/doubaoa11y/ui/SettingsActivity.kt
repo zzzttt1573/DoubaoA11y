@@ -107,7 +107,7 @@ class SettingsActivity : Activity() {
                 addGroup(root, Group.HOLD)
                 root.addView(note("提示：删除键停留可快速删除，空格键停留进行语音输入"))
                 root.addView(heading("快速输入"))
-                root.addView(note("提示：键盘响应更快，天坦读屏原生支持，其他读屏需在关闭触摸浏览情况下使用"))
+                root.addView(note("提示：键盘响应更快，天坦和解说原生支持，其他读屏需在关闭触摸浏览情况下使用"))
                 addGroup(root, Group.FAST)
             }
             CANDIDATE -> {
