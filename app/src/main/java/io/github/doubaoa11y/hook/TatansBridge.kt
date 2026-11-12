@@ -28,8 +28,10 @@ import android.view.accessibility.AccessibilityManager
  * 接口是按天坦读屏对外提供的绑定动作和方法编号调用的，没有用天坦的代码。
  *
  * 解说（com.nirenr.talkman）也支持同样的效果，但接口不同：它对外开放了一个广播，
- * 输入法显示时发 ACTION_INPUTMETHOD_SHOW 带上键盘区域，解说就把这块设为触摸浏览穿透；
- * 收起时发 ACTION_INPUTMETHOD_HIDE 撤掉。解说接天坦输入法用的是另一套（解说主动绑定 com.tatans.inputmethod），
+ * 输入法显示时发 ACTION_INPUTMETHOD_SHOW 带上键盘区域，解说就把这块设为触摸浏览穿透。
+ * 收起时不发 ACTION_INPUTMETHOD_HIDE：那样解说会把记着的区域清成“没有”，之后改用它自己的默认穿透区域，
+ * 收起键盘后屏幕上按住就成了长按。像天坦输入法那样，收起时也发 SHOW，只是给一个空区域（左边 -1，其余 0），
+ * 解说记着这个空区域，每次触摸结束重新设一遍，就不会穿透了。解说接天坦输入法用的是另一套（解说主动绑定 com.tatans.inputmethod），
  * 只认天坦输入法的包名，豆包用不了，所以这里走广播。
  */
 object TatansBridge {
@@ -40,7 +42,6 @@ object TatansBridge {
 
     private const val TALKMAN = "com.nirenr.talkman"
     private const val TALKMAN_SHOW = "com.nirenr.talkman.ACTION_INPUTMETHOD_SHOW"
-    private const val TALKMAN_HIDE = "com.nirenr.talkman.ACTION_INPUTMETHOD_HIDE"
     private const val TALKMAN_RECT = "com.nirenr.talkman.EXTRA_RECT_DATA"
 
     private val main = Handler(Looper.getMainLooper())
@@ -92,6 +93,12 @@ object TatansBridge {
             L.hookError("TatansBridge.init", t)
         }
         refresh("初始化")
+        // 豆包进程重启前可能给解说设过穿透，还没来得及撤掉：启动时先撤一次
+        try {
+            if (talkmanWanted()) sendTalkman(Rect(), "初始化")
+        } catch (t: Throwable) {
+            L.hookError("TatansBridge.initTalkman", t)
+        }
     }
 
     private object Build {
@@ -237,13 +244,14 @@ object TatansBridge {
         }
     }
 
-    /** 解说：广播键盘区域（空区域就撤掉穿透） */
+    /** 解说：广播键盘区域（空区域就撤掉穿透，用 SHOW 带空区域，原因见类说明） */
     private fun sendTalkman(r: Rect, why: String) {
         val c = ctx ?: return
         try {
-            val i = if (r.isEmpty) Intent(TALKMAN_HIDE)
-            else Intent(TALKMAN_SHOW).putExtra(TALKMAN_RECT, Rect(r))
-            c.sendBroadcast(i.setPackage(TALKMAN))
+            val area = if (r.isEmpty) Rect(-1, 0, 0, 0) else Rect(r)
+            // 前台广播：普通广播系统会压 500 毫秒才送到，收起键盘后这段时间还是直接触摸
+            c.sendBroadcast(Intent(TALKMAN_SHOW).putExtra(TALKMAN_RECT, area).setPackage(TALKMAN)
+                .addFlags(Intent.FLAG_RECEIVER_FOREGROUND))
             talkmanCurrent.set(r)
             L.i("解说触摸穿透（$why）：${if (r.isEmpty) "撤掉" else Fmt.rect(r)}")
         } catch (t: Throwable) {

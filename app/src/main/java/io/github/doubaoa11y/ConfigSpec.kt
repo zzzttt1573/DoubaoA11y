@@ -47,6 +47,8 @@ object ConfigSpec {
         Item("logText", "日志包含输入的文字", false, Group.LOG,
             "提示：默认把打的字和语音识别的文字换成星号。排查语音、候选的问题时，作者可能会请你打开"),
         // 快速输入（触摸直接到键盘时）
+        Item("tatansFast", "快速输入", true, Group.FAST,
+            "提示：键盘响应更快，天坦和解说原生支持，其他读屏需在关闭触摸浏览情况下使用"),
         Item("nativeSpace", "空格键改为豆包原生操作", false, Group.FAST,
             "提示：豆包原生操作为：短按语音输入，空格上左右滑动可移动光标"),
         Item("nativeDelete", "删除键改为豆包原生操作", false, Group.FAST,
@@ -83,7 +85,6 @@ object ConfigSpec {
         Item("speakCandidate", "朗读第一个候选", true, Group.FIXED),
         Item("editPanel", "编辑面板", true, Group.FIXED),
         Item("voiceBuffer", "语音说完再上屏", true, Group.FIXED),
-        Item("tatansFast", "快速打字", true, Group.FIXED),
         Item("labelViews", "按钮中文名", true, Group.FIXED),
         Item("queryNative", "查询键盘类型", true, Group.FIXED),
         Item("nineDigits", "九键拼音按键读数字（如 abc 键读 2）", true, Group.FIXED),
