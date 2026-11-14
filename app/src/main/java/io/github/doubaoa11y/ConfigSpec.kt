@@ -6,8 +6,8 @@ package io.github.doubaoa11y
  */
 object ConfigSpec {
     /** 模块自己的版本（build.gradle.kts 从这里读） */
-    const val MODULE_VERSION_CODE = 45
-    const val MODULE_VERSION_NAME = "1.1.5"
+    const val MODULE_VERSION_CODE = 46
+    const val MODULE_VERSION_NAME = "1.2.0"
 
     const val TARGET_PACKAGE = "com.bytedance.android.doubaoime"
     /** 已适配的豆包版本：版本号 -> 版本名 */
