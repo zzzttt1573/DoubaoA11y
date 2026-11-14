@@ -449,13 +449,11 @@ object VirtualKeys {
                 if (t.same(current)) return true
                 cancelHold()
                 current = t
+                lastAnnounce = SystemClock.uptimeMillis()
                 if (EditPanel.isOpen) L.i("编辑面板打开时摸到「${t.name}」${if (t.key != null) "（键盘键）" else t.view?.javaClass?.simpleName ?: ""}")
                 Haptic.tick()
                 Speaker.speak(t.name)
-                if (t.key != null && t.kb != null) {
-                    scheduleHold(t.kb, t.key)
-                    scheduleColumnScroll(root, t.kb, t.key, rx, ry)
-                }
+                if (t.key != null && t.kb != null) scheduleHold(t.kb, t.key)
             }
             MotionEvent.ACTION_HOVER_EXIT -> {
                 val c = current
@@ -472,12 +470,6 @@ object VirtualKeys {
                         L.i("抬手输入「${c.name}」")
                         tap(c.kb, c.key)
                     } else if (c.view != null) {
-                        val now = SystemClock.uptimeMillis()
-                        if (now - lastViewTap < 450) {
-                            L.i("忽略重复点击「${c.name}」")
-                            return true
-                        }
-                        lastViewTap = now
                         L.i("抬手点击「${c.name}」 ${c.view.javaClass.simpleName}")
                         tapView(root, c.view)
                         Panels.focusIfOpened(root)
@@ -488,76 +480,6 @@ object VirtualKeys {
         return true
     }
 
-
-    // ---------------- 符号栏自动滚动 ----------------
-
-    private const val COLUMN_SCROLL_MS = 800L
-    private var scrollRunnable: Runnable? = null
-
-    /**
-     * 九键、数字键盘左边的符号栏要滑动才能看到下面的符号：
-     * 手指停在最下面一格 0.8 秒就往上滚，停在最上面一格就往下滚，滚完读手指下面的新符号。
-     */
-    private fun scheduleColumnScroll(root: View, kb: View, k: Key, rx: Float, ry: Float) {
-        if (!k.inColumn) return
-        val bg = k.bg ?: return
-        val col = KeyboardViewHooks.tableOf(kb)?.keys()?.filter { it.inColumn && it.bg?.rect == bg.rect } ?: return
-        if (col.size < 2) return
-        val bottom = col.maxByOrNull { it.rect.top }!!
-        val top = col.minByOrNull { it.rect.top }!!
-        val dir = when {
-            k.rect == bottom.rect -> -1   // 手指往上拖，内容往上走，露出下面的
-            k.rect == top.rect -> 1
-            else -> return
-        }
-        val r = Runnable {
-            scrollRunnable = null
-            try {
-                dragColumn(kb, bg.rect, dir)
-                main.postDelayed({
-                    try {
-                        // 重新看手指下面是什么，读出来
-                        current = null
-                        val t = targetAt(root, rx, ry) ?: return@postDelayed
-                        current = t
-                        Haptic.tick()
-                        Speaker.speak(t.name)
-                        if (t.key != null && t.kb != null) scheduleColumnScroll(root, t.kb, t.key, rx, ry)
-                    } catch (e: Throwable) {
-                        L.hookError("VirtualKeys.afterScroll", e)
-                    }
-                }, 450)
-            } catch (e: Throwable) {
-                L.hookError("VirtualKeys.columnScroll", e)
-            }
-        }
-        scrollRunnable = r
-        main.postDelayed(r, COLUMN_SCROLL_MS)
-    }
-
-    /** 在符号栏上模拟一次拖动，距离是半栏高 */
-    private fun dragColumn(kb: View, col: Rect, dir: Int) {
-        val vl = IntArray(2)
-        kb.getLocationOnScreen(vl)
-        val x = vl[0] + col.exactCenterX()
-        val dist = col.height() * 0.5f
-        val y0 = vl[1] + col.exactCenterY() - dir * dist / 2
-        val down = SystemClock.uptimeMillis()
-        L.i("符号栏${if (dir < 0) "向下" else "向上"}滚动")
-        inject(kb, down, MotionEvent.ACTION_DOWN, x, y0)
-        val steps = 8
-        for (i in 1..steps) {
-            val y = y0 + dir * dist * i / steps
-            main.postDelayed({
-                try {
-                    inject(kb, down, MotionEvent.ACTION_MOVE, x, y)
-                    if (i == steps) inject(kb, down, MotionEvent.ACTION_UP, x, y)
-                } catch (e: Throwable) {
-                    L.hookError("VirtualKeys.drag", e)
-                }
-            }, (i * 16).toLong())
-        }
-    }
 
     /** 上一次触摸是不是落在交给读屏的界面里 */
     private var inReaderPanel = false
@@ -597,6 +519,8 @@ object VirtualKeys {
                 depth++
             }
         }
+        // 编辑面板按钮之间的缝：落在底板上就取最近的按钮，不读整个面板
+        if (EditPanel.isBackdrop(v)) v = EditPanel.nearestButton(rx, ry) ?: return null
         // 整条可点的容器（工具栏上的剪贴板条）里只有一个带文字的可点项目：点那个项目，不点容器中间的空白
         if (v is android.view.ViewGroup) {
             onlyClickableChild(v)?.let { v = it }
@@ -902,8 +826,6 @@ object VirtualKeys {
     private fun cancelHold() {
         holdRunnable?.let { main.removeCallbacks(it) }
         holdRunnable = null
-        scrollRunnable?.let { main.removeCallbacks(it) }
-        scrollRunnable = null
         val k = holding ?: return
         val v = holdView ?: run { holding = null; return }
         if (holdIsVoice && !voiceShown(v)) {
@@ -1023,7 +945,19 @@ object VirtualKeys {
         press(v, k, 40)
     }
 
+    /** 最近一次输入按键、最近一次摸到新目标并朗读的时间。输入后又摸到新键，就不再读上一个键带出来的候选 */
+    @Volatile
+    var lastKeyTap = 0L
+        private set
+    @Volatile
+    var lastAnnounce = 0L
+        private set
+
+    /** 上一个键输入之后，手指已经摸到别的键了 */
+    fun movedOnSinceTap(): Boolean = lastAnnounce > lastKeyTap
+
     private fun press(v: View, k: Key, ms: Long) {
+        lastKeyTap = SystemClock.uptimeMillis()
         val vl = IntArray(2)
         v.getLocationOnScreen(vl)
         val x = vl[0] + k.rect.exactCenterX()
@@ -1146,7 +1080,6 @@ object VirtualKeys {
     private var passThrough = false
     /** 空格交给豆包原生处理时的键盘视图，用来跟踪语音长按界面的区域 */
     private var nativeVoiceKb: View? = null
-    private var lastViewTap = 0L
 
     // 触摸浏览关着时的横向滑动（候选栏左右翻）：按下时记下来，滑得快就整串交给豆包
     private var downX = 0f

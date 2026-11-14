@@ -217,6 +217,14 @@ object Candidates {
         val text = CharWords.candidate(first)
         // 稍等一下，让读屏先读完编辑框里拼音的变化，再读候选
         main.removeCallbacksAndMessages(token)
-        main.postAtTime({ Speaker.speak(text) }, token, android.os.SystemClock.uptimeMillis() + 120)
+        // 这期间手指已经摸到下一个键：不读了，免得插在下一个键的朗读后面
+        if (VirtualKeys.movedOnSinceTap()) {
+            L.i("已摸到下一个键，不读候选「$first」")
+            return
+        }
+        main.postAtTime({
+            if (VirtualKeys.movedOnSinceTap()) L.i("已摸到下一个键，不读候选「$first」")
+            else Speaker.speak(text)
+        }, token, android.os.SystemClock.uptimeMillis() + 120)
     }
 }

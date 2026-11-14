@@ -90,6 +90,33 @@ object EditPanel {
         }, 350)
     }
 
+    private val buttons = ArrayList<View>()
+
+    /** 是不是编辑面板的底板或按钮网格（不是按钮本身） */
+    fun isBackdrop(v: View): Boolean {
+        val p = panel ?: return false
+        return v === p || (p is ViewGroup && p.childCount > 0 && v === p.getChildAt(0))
+    }
+
+    /** 离屏幕坐标 (rx, ry) 最近的编辑面板按钮 */
+    fun nearestButton(rx: Float, ry: Float): View? {
+        var best: View? = null
+        var bestD = Float.MAX_VALUE
+        val loc = IntArray(2)
+        for (b in buttons) {
+            if (!b.isShown) continue
+            b.getLocationOnScreen(loc)
+            val dx = maxOf(0f, maxOf(loc[0] - rx, rx - (loc[0] + b.width)))
+            val dy = maxOf(0f, maxOf(loc[1] - ry, ry - (loc[1] + b.height)))
+            val d = kotlin.math.hypot(dx, dy)
+            if (d < bestD) {
+                bestD = d
+                best = b
+            }
+        }
+        return best
+    }
+
     fun close() {
         val v = panel ?: return
         panel = null
@@ -125,11 +152,15 @@ object EditPanel {
                 Btn("返回", "返回键盘") { close(); Speaker.speak("已返回键盘") },
             ),
         )
+        buttons.clear()
         val grid = GridLayout(ctx)
         grid.rowCount = rows.size
         grid.columnCount = 5
-        val pad = (4 * d).toInt()
+        // 按钮之间的缝尽量小：有的读屏摸到缝里会读出整个面板的文字
+        val pad = (2 * d).toInt()
+        val gap = d.toInt().coerceAtLeast(1)
         grid.setPadding(pad, pad, pad, pad)
+        grid.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         for ((r, row) in rows.withIndex()) {
             for ((c, b) in row.withIndex()) {
                 val tv = TextView(ctx)
@@ -157,14 +188,17 @@ object EditPanel {
                 )
                 lp.width = 0
                 lp.height = 0
-                lp.setMargins(pad, pad, pad, pad)
+                lp.setMargins(gap, gap, gap, gap)
                 grid.addView(tv, lp)
+                buttons.add(tv)
             }
         }
         return FrameLayout(ctx).apply {
             setBackgroundColor(Color.parseColor("#141414"))
             // 挡住下面的键盘
             isClickable = true
+            // 底板只用来挡住键盘，不给读屏当成一个能读的控件
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             addView(grid, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         }
     }
