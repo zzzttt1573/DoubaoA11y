@@ -38,6 +38,12 @@ object ClipboardNav {
     @Volatile
     private var pendingActive = false
 
+    @Volatile
+    private var lastNativeCount = -1
+
+    @Volatile
+    private var usingNative = false
+
     private var clipListener: ClipboardManager.OnPrimaryClipChangedListener? = null
 
     fun init(c: Context) {
@@ -45,14 +51,18 @@ object ClipboardNav {
         initialized = true
         val app = c.applicationContext ?: c
         ctx = app
-        loadFromDisk(app)
-        syncPrimaryClip(app)
+        if (!syncFromDoubaoNative()) {
+            loadFromDisk(app)
+            syncPrimaryClip(app)
+        }
         try {
             val cm = app.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
             if (cm != null) {
                 val l = ClipboardManager.OnPrimaryClipChangedListener {
                     try {
-                        syncPrimaryClip(app)
+                        if (!syncFromDoubaoNative()) {
+                            syncPrimaryClip(app)
+                        }
                     } catch (t: Throwable) {
                         L.hookError("ClipboardNav.onPrimaryClipChanged", t)
                     }
@@ -65,9 +75,10 @@ object ClipboardNav {
         }
     }
 
-    /** 键盘弹出或切换输入框时同步一次当前系统剪贴板，避免休眠期间复制的内容遗漏 */
+    /** 键盘弹出或切换输入框时同步一次当前剪贴板，优先直连豆包原生剪贴板 */
     fun onKeyboardShown() {
         clearPending()
+        if (syncFromDoubaoNative()) return
         val c = ctx ?: ServiceHooks.appContext ?: return
         syncPrimaryClip(c)
     }
@@ -92,15 +103,20 @@ object ClipboardNav {
         }
     }
 
-    /** 上一个剪贴板（往更早/更前方向？按列表序号减 1，第 1 条最新） */
+    /** 上一个剪贴板（按豆包剪贴板列表序号减 1，第 1 条最新） */
     fun prev(): Boolean = step(-1)
 
     /** 下一个剪贴板（序号加 1，往更旧条目浏览） */
     fun next(): Boolean = step(1)
 
     private fun step(dir: Int): Boolean {
-        val c = ctx ?: ServiceHooks.appContext
-        if (c != null) syncPrimaryClip(c)
+        val needRefresh = !pendingActive || items.isEmpty() || nativeCountChanged()
+        if (needRefresh) {
+            if (!syncFromDoubaoNative()) {
+                val c = ctx ?: ServiceHooks.appContext
+                if (c != null) syncPrimaryClip(c)
+            }
+        }
         val speakMsg: String
         val hitBoundary: Boolean
         synchronized(lock) {
@@ -140,8 +156,93 @@ object ClipboardNav {
         if (hitBoundary) Sound.play("boundary")
         Speaker.unmute()
         Speaker.echo(speakMsg)
-        L.i("切换剪贴板（dir=$dir，边界=$hitBoundary）：第 ${cursor + 1} 条，长度=${items.getOrNull(cursor)?.length ?: 0}")
+        L.i("切换剪贴板（dir=$dir，源=${if (usingNative) "豆包原生" else "系统兜底"}，边界=$hitBoundary）：第 ${cursor + 1}/${items.size} 条，长度=${items.getOrNull(cursor)?.length ?: 0}")
         return true
+    }
+
+    /** 查询豆包原生剪贴板总数是否变化（用于连续翻页时轻量判断是否需要重拉） */
+    private fun nativeCountChanged(): Boolean {
+        val c = JniHooks.jniClass ?: return false
+        val j = JniHooks.jni() ?: return false
+        val m = de.robv.android.xposed.XposedHelpers.findMethodExactIfExists(c, "getClipboardHistoryCount") ?: return false
+        return try {
+            val count = (m.invoke(j) as? Number)?.toInt() ?: return false
+            count != lastNativeCount
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * 直接同步豆包输入法原生的剪贴板历史（KeyboardJni.getClipboardHistoryPage(offset, limit)）。
+     * 豆包原生每次分页限制 <= 10 条，返回 JSON：{"total_count": N, "items": [{"phrase": "...", ...}]}。
+     * 成功返回 true（即使原生剪贴板为空，也会如实清空本地列表以保持完全一致）；
+     * 接口不可用或抛异常时返回 false，交由系统剪贴板监听兜底。
+     */
+    private fun syncFromDoubaoNative(): Boolean {
+        val c = JniHooks.jniClass ?: return false
+        val j = JniHooks.jni() ?: return false
+        val intType = Int::class.javaPrimitiveType!!
+        val pageMethod = de.robv.android.xposed.XposedHelpers.findMethodExactIfExists(
+            c, "getClipboardHistoryPage", intType, intType,
+        ) ?: return false
+        return try {
+            val fetched = ArrayList<String>()
+            var offset = 0
+            var totalCount = -1
+            var pages = 0
+            var parsedAny = false
+            while (fetched.size < MAX_ITEMS && pages < 12) {
+                val limit = minOf(10, MAX_ITEMS - fetched.size)
+                val raw = pageMethod.invoke(j, offset, limit) as? String ?: break
+                if (raw.isBlank()) break
+                val obj = org.json.JSONObject(raw)
+                parsedAny = true
+                val tc = obj.optInt("total_count", -1)
+                if (totalCount < 0 && tc >= 0) totalCount = tc
+                val arr = obj.optJSONArray("items") ?: break
+                val n = arr.length()
+                if (n <= 0) break
+                for (i in 0 until n) {
+                    val row = arr.optJSONObject(i) ?: continue
+                    val phrase = row.optString("phrase", "").ifEmpty { row.optString("content", "") }
+                    if (phrase.isNotEmpty()) {
+                        fetched.add(phrase.replace("\r\n", "\n"))
+                    }
+                }
+                offset += n
+                pages++
+                if (totalCount >= 0 && offset >= totalCount) break
+                if (n < limit) break
+            }
+            if (!parsedAny) {
+                usingNative = false
+                return false
+            }
+            synchronized(lock) {
+                val prevSelected = if (pendingActive && cursor in items.indices) items[cursor] else null
+                items.clear()
+                items.addAll(fetched)
+                lastNativeCount = if (totalCount >= 0) totalCount else fetched.size
+                usingNative = true
+                if (pendingActive) {
+                    val newIdx = if (prevSelected != null) items.indexOf(prevSelected) else -1
+                    if (newIdx >= 0) {
+                        cursor = newIdx
+                    } else if (items.isEmpty()) {
+                        pendingActive = false
+                        cursor = -1
+                    } else {
+                        cursor = cursor.coerceIn(0, items.lastIndex)
+                    }
+                }
+            }
+            true
+        } catch (t: Throwable) {
+            L.hookError("ClipboardNav.syncFromDoubaoNative", t)
+            usingNative = false
+            false
+        }
     }
 
     /**

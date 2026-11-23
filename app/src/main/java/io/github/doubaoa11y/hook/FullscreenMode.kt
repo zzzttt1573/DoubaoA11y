@@ -495,7 +495,10 @@ object FullscreenMode {
         if (!active || !wanted) return false
         val l = layer ?: return false
         if (!l.isShown) return false
-        val local = toLayer(root, l, ev) ?: return false
+        // 手指按下在上半屏后，后续移动/抬手即使向下越界进入键盘区，也应继续交给手势层完成识别，
+        // 避免单指下滑、单指向下拖动或下滑折线手势因进入键盘区而被 cancelGesture 吞掉。
+        val anywhere = ev.actionMasked != MotionEvent.ACTION_DOWN
+        val local = toLayer(root, l, ev, anywhere = anywhere) ?: return false
         return try {
             l.handleTouch(local)
         } finally {

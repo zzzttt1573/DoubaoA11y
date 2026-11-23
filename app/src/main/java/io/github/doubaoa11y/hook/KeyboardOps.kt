@@ -231,17 +231,27 @@ object KeyboardOps {
         return try { m.invoke(null); true } catch (t: Throwable) { L.hookError("KeyboardOps.send", t); false }
     }
 
-    fun send(): Boolean {
+    fun send(announce: Boolean = true): Boolean {
         if (!A11yState.recording) return false
         if (!doubaoSend()) {
             Speaker.speak("当前豆包版本无法执行发送，请使用应用自己的发送按钮")
             return false
         }
+        if (announce) Speaker.speak("已发送")
         return true
     }
 
     /** 显式动作：只调用一次发送入口，然后收起；不声称服务端已收到消息。 */
-    fun sendAndHide(): Boolean = send() && hide()
+    fun sendAndHide(): Boolean {
+        if (!send(announce = false)) return false
+        val hidden = hide(announce = false)
+        if (hidden && !Config.b("announceHide")) {
+            Speaker.speak("已发送，键盘已收起")
+        } else {
+            Speaker.speak("已发送")
+        }
+        return hidden
+    }
 
     /** 返回：先收起豆包自己开着的面板（菜单、剪贴板、常用语），都没有就收起键盘 */
     fun back(): Boolean {
@@ -263,10 +273,13 @@ object KeyboardOps {
     }
 
     /** 收起键盘 */
-    fun hide(): Boolean {
+    fun hide(announce: Boolean = true): Boolean {
         val svc = service() ?: return false
         return try {
             svc.requestHideSelf(0)
+            if (announce && !Config.b("announceHide")) {
+                Speaker.speak("键盘已收起")
+            }
             true
         } catch (t: Throwable) {
             L.hookError("KeyboardOps.hide", t)

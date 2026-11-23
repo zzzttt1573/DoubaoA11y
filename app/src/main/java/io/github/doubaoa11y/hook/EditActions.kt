@@ -624,11 +624,17 @@ object EditActions {
         val len = text.length
         if (len == 0) return ""
         val p = pos.coerceIn(0, len)
-        fun isBreak(c: Char): Boolean = if (para) c == '\n' else isSentenceSymbol(c)
+        if (para) {
+            var a = p
+            while (a > 0 && text[a - 1] != '\n') a--
+            var b = p
+            while (b < len && text[b] != '\n') b++
+            return text.substring(a, b).trim()
+        }
         var a = p
-        while (a > 0 && !isBreak(text[a - 1])) a--
+        while (a > 0 && !isSentenceSymbol(text[a - 1])) a--
         var b = p
-        while (b < len && !isBreak(text[b])) b++
+        while (b < len && !isSentenceSymbol(text[b])) b++
         if (b < len) b++
         return text.substring(a, b).replace('\n', '，').trim()
     }
@@ -1284,7 +1290,11 @@ object EditActions {
         val t = s.text
         val caret = s.indexOf(s.caret)
         val len = t.length
-        if (len == 0) return
+        if (len == 0) {
+            Sound.play("boundary")
+            Speaker.speak("编辑框为空")
+            return
+        }
         val p = boundaryOf(Unit.SENTENCE, t, caret, dir)
         if (p < 0) {
             speakBoundary(dir, s)
@@ -1326,11 +1336,9 @@ object EditActions {
         ic.setSelection(s.offset + p, s.offset + p)
         Speaker.hushReader()
         val para = segmentAt(s.text, p, para = true)
-        // 空的（连着的空行）不念“上一段/下一段”，见同一版的说明
-        if (para.isNotEmpty()) {
-            val d = if (kotlin.math.abs(p - caret) <= 1) cancelSelectionDelayMs() else selectionDelayMs()
-            scheduleAfterSelection(para, isEcho = true, afterSelMs = d, fallbackMs = SelectionOverrideTiming.fallbackMs(d))
-        }
+        val msg = if (para.isNotEmpty()) para else "空行"
+        val d = if (kotlin.math.abs(p - caret) <= 1) cancelSelectionDelayMs() else selectionDelayMs()
+        scheduleAfterSelection(msg, isEcho = true, afterSelMs = d, fallbackMs = SelectionOverrideTiming.fallbackMs(d))
     }
 
     // ---------------- 整篇的开头、结尾 ----------------
@@ -1530,6 +1538,109 @@ object EditActions {
         scheduleAfterSelection(msg, afterSelMs = d, fallbackMs = SelectionOverrideTiming.fallbackMs(d))
     }
 
+    /**
+     * 删除上一句：删除光标前面的字符，直到按句移动光标配置的断句符号（sentenceSymbols）边界。
+     * 光标正好在断句符号后面时（如“第一句。第二句。|”），会把该句连同末尾标点整句删掉；
+     * 若编辑框为空或已在开头则提示边界。
+     */
+    fun deletePrevSentence() {
+        val ic = ic() ?: return
+        val s = snapshot(ic) ?: return
+        clearSelectionState("删除上一句")
+        val text = s.text
+        if (text.isEmpty()) {
+            Sound.play("boundary")
+            Speaker.speak("编辑框为空")
+            return
+        }
+        val caret = s.indexOf(minOf(s.start, s.end))
+        if (caret <= 0) {
+            Sound.play("boundary")
+            Speaker.speak("已到开头")
+            return
+        }
+        val target = boundaryOf(Unit.SENTENCE, text, caret, -1)
+        val lo = if (target < 0) 0 else target.coerceIn(0, caret)
+        if (lo >= caret) {
+            Sound.play("boundary")
+            Speaker.speak("已到开头")
+            return
+        }
+        deleteSentenceRange(ic, s, lo, caret, beforeCaret = true, reason = "删除上一句")
+    }
+
+    /**
+     * 删除下一句：删除光标后面的字符，直到删完按句移动光标配置的断句符号（sentenceSymbols）。
+     * 若编辑框为空或已在结尾则提示边界。
+     */
+    fun deleteNextSentence() {
+        val ic = ic() ?: return
+        val s = snapshot(ic) ?: return
+        clearSelectionState("删除下一句")
+        val text = s.text
+        if (text.isEmpty()) {
+            Sound.play("boundary")
+            Speaker.speak("编辑框为空")
+            return
+        }
+        val caret = s.indexOf(maxOf(s.start, s.end))
+        if (caret >= text.length) {
+            Sound.play("boundary")
+            Speaker.speak("已到结尾")
+            return
+        }
+        val target = boundaryOf(Unit.SENTENCE, text, caret, 1)
+        val hi = if (target < 0) text.length else target.coerceIn(caret, text.length)
+        if (hi <= caret) {
+            Sound.play("boundary")
+            Speaker.speak("已到结尾")
+            return
+        }
+        deleteSentenceRange(ic, s, caret, hi, beforeCaret = false, reason = "删除下一句")
+    }
+
+    private fun deleteSentenceRange(
+        ic: InputConnection,
+        s: Snapshot,
+        lo: Int,
+        hi: Int,
+        beforeCaret: Boolean,
+        reason: String,
+    ) {
+        val removed = s.text.substring(lo, hi)
+        if (removed.isEmpty()) return
+        Candidates.onCursorMove()
+        TypingEcho.suppressDeleteFor()
+        val deleted = try {
+            if (!s.hasSelection) {
+                val len = hi - lo
+                if (beforeCaret) ic.deleteSurroundingText(len, 0) else ic.deleteSurroundingText(0, len)
+            } else {
+                false
+            }
+        } catch (t: Throwable) {
+            L.hookError("EditActions.$reason.deleteSurrounding", t)
+            false
+        }
+        if (!deleted) {
+            try {
+                ic.beginBatchEdit()
+                ic.setSelection(s.offset + lo, s.offset + hi)
+                ic.commitText("", 1)
+                ic.endBatchEdit()
+            } catch (t: Throwable) {
+                L.hookError("EditActions.$reason", t)
+                return
+            }
+        }
+        speechGate.markSkipNext(SystemClock.uptimeMillis())
+        val d = textChangeDelayMs()
+        val count = removed.codePointCount(0, removed.length)
+        val msg = GestureSpeechFormat.deleted(plainLabel(removed), count)
+        scheduleAfterSelection(msg, afterSelMs = d, fallbackMs = SelectionOverrideTiming.fallbackMs(d))
+        main.postDelayed({ EditOptions.refresh(reason) }, 140)
+    }
+
     private fun charBefore(): Char? = try {
         val ic = ic() ?: return null
         val s = snapshot(ic) ?: return null
@@ -1565,7 +1676,18 @@ object EditActions {
         if (t.isEmpty()) Speaker.speak("选中的是空白") else Speaker.speak("${t}，已选中")
     }
 
-    /** 撤销上一次编辑：优先执行系统 undo，不支持时自动发送 Ctrl+Z 快捷键兜底 */
+    private fun sendCtrlZ(ic: InputConnection) {
+        try {
+            val t = SystemClock.uptimeMillis()
+            val meta = KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON
+            ic.sendKeyEvent(KeyEvent(t, t, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_Z, 0, meta))
+            ic.sendKeyEvent(KeyEvent(t, t, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_Z, 0, meta))
+        } catch (t: Throwable) {
+            L.hookError("EditActions.undoCtrlZ", t)
+        }
+    }
+
+    /** 撤销上一次编辑：优先执行系统 undo，未生效或不支持时自动发送 Ctrl+Z 快捷键兜底 */
     fun undo() {
         val ic = ic() ?: return
         val before = snapshot(ic)?.text
@@ -1576,27 +1698,40 @@ object EditActions {
             false
         }
         if (!ctxOk) {
-            try {
-                val t = SystemClock.uptimeMillis()
-                val meta = KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON
-                ic.sendKeyEvent(KeyEvent(t, t, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_Z, 0, meta))
-                ic.sendKeyEvent(KeyEvent(t, t, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_Z, 0, meta))
-            } catch (t: Throwable) {
-                L.hookError("EditActions.undoCtrlZ", t)
-            }
+            sendCtrlZ(ic)
         }
         clearSelectionState("撤销")
         main.postDelayed({
             val after = snapshot(ic)?.text
             val changed = before != null && after != null && after != before
-            if (ctxOk || changed) {
+            if (changed) {
+                Speaker.speak("已撤销")
+                main.postDelayed({ readLine(quiet = true) }, 90)
+                main.postDelayed({ EditOptions.refresh("撤销") }, 140)
+                return@postDelayed
+            }
+            if (ctxOk && before != null) {
+                // 部分编辑框 performContextMenuAction(undo) 返回 true 但未实际改动文本，补发一次 Ctrl+Z
+                sendCtrlZ(ic)
+                main.postDelayed({
+                    val after2 = snapshot(ic)?.text
+                    val changed2 = after2 != null && after2 != before
+                    if (changed2) {
+                        Speaker.speak("已撤销")
+                        main.postDelayed({ readLine(quiet = true) }, 90)
+                        main.postDelayed({ EditOptions.refresh("撤销") }, 140)
+                    } else {
+                        Speaker.speak("没有可撤销的内容")
+                    }
+                }, 70)
+            } else if (ctxOk || before == null) {
                 Speaker.speak("已撤销")
                 main.postDelayed({ readLine(quiet = true) }, 90)
                 main.postDelayed({ EditOptions.refresh("撤销") }, 140)
             } else {
                 Speaker.speak("这个输入框不支持撤销")
             }
-        }, 80)
+        }, 70)
     }
 
     /** 清空文本：全选再删，一次清干净 */
@@ -1872,7 +2007,8 @@ object EditActions {
         ConfigSpec.ACT_PREV_PARA, ConfigSpec.ACT_NEXT_PARA,
         ConfigSpec.ACT_DOC_START, ConfigSpec.ACT_DOC_END,
         ConfigSpec.ACT_SELECT_TEXT, ConfigSpec.ACT_DESELECT,
-        ConfigSpec.ACT_DELETE_LEFT, ConfigSpec.ACT_DELETE_RIGHT, ConfigSpec.ACT_ENTER,
+        ConfigSpec.ACT_DELETE_LEFT, ConfigSpec.ACT_DELETE_RIGHT,
+        ConfigSpec.ACT_DELETE_PREV_SENTENCE, ConfigSpec.ACT_DELETE_NEXT_SENTENCE, ConfigSpec.ACT_ENTER,
         ConfigSpec.ACT_CLEAR_TEXT, ConfigSpec.ACT_UNDO,
         ConfigSpec.ACT_READ_EDITOR, ConfigSpec.ACT_READ_LINE, ConfigSpec.ACT_READ_ALL, ConfigSpec.ACT_READ_SELECTION,
         ConfigSpec.ACT_CHAR_COUNT, ConfigSpec.ACT_HINT,
@@ -1900,6 +2036,8 @@ object EditActions {
             ConfigSpec.ACT_DESELECT -> deselect()
             ConfigSpec.ACT_DELETE_LEFT -> deleteLeft()
             ConfigSpec.ACT_DELETE_RIGHT -> deleteRight()
+            ConfigSpec.ACT_DELETE_PREV_SENTENCE -> deletePrevSentence()
+            ConfigSpec.ACT_DELETE_NEXT_SENTENCE -> deleteNextSentence()
             ConfigSpec.ACT_CLEAR_TEXT -> clearText()
             ConfigSpec.ACT_UNDO -> undo()
             ConfigSpec.ACT_ENTER -> enter()

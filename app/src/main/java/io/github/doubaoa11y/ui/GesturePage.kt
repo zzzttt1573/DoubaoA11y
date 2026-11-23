@@ -16,11 +16,25 @@ object GesturePage {
             a.startActivity(Intent(a, SettingsActivity::class.java).putExtra(SettingsActivity.EXTRA_PAGE, SettingsActivity.EDITOPTS))
         })
 
-        // 单指、双指、拖动，直接排下来，每组一个标题
+        // 单指、单指往返、单指折线、双指、拖动，直接排下来，每组一个标题
         root.addView(a.heading("单指"))
         a.addKeysNoHint(
             root,
             *ConfigSpec.GESTURE_SLOTS.filter { it.first in 0..ConfigSpec.G_SINGLE_DOWN }
+                .map { ConfigSpec.gestureKey(it.first) }.toTypedArray(),
+        )
+
+        root.addView(a.heading("单指往返"))
+        a.addKeysNoHint(
+            root,
+            *ConfigSpec.GESTURE_SLOTS.filter { it.first in ConfigSpec.G_LEFT_RIGHT..ConfigSpec.G_DOWN_UP }
+                .map { ConfigSpec.gestureKey(it.first) }.toTypedArray(),
+        )
+
+        root.addView(a.heading("单指折线"))
+        a.addKeysNoHint(
+            root,
+            *ConfigSpec.GESTURE_SLOTS.filter { it.first in ConfigSpec.G_UP_LEFT..ConfigSpec.G_RIGHT_DOWN }
                 .map { ConfigSpec.gestureKey(it.first) }.toTypedArray(),
         )
 

@@ -17,8 +17,79 @@ object GestureMap {
 
     fun actionName(action: Int): String = ConfigSpec.actionName(action)
 
+    const val DIR_NONE = 0
+    const val DIR_LEFT = 1
+    const val DIR_RIGHT = 2
+    const val DIR_UP = 3
+    const val DIR_DOWN = 4
+
     /** 往左上左下这些斜向按主轴算：左右差得多就是左右，上下差得多就是上下 */
     private fun dominant(dx: Float, dy: Float): Boolean = kotlin.math.abs(dx) >= kotlin.math.abs(dy)
+
+    /** 判断位移对应的主方向，不够距离返回 DIR_NONE */
+    fun directionOf(dx: Float, dy: Float, minDist: Float): Int {
+        if (kotlin.math.abs(dx) < minDist && kotlin.math.abs(dy) < minDist) return DIR_NONE
+        return if (dominant(dx, dy)) {
+            if (dx > 0) DIR_RIGHT else DIR_LEFT
+        } else {
+            if (dy > 0) DIR_DOWN else DIR_UP
+        }
+    }
+
+    /** 单指方向对应的折线/往返槽位 */
+    fun compoundSlot(first: Int, second: Int): Int? = when (first) {
+        DIR_LEFT -> when (second) {
+            DIR_RIGHT -> ConfigSpec.G_LEFT_RIGHT
+            DIR_UP -> ConfigSpec.G_LEFT_UP
+            DIR_DOWN -> ConfigSpec.G_LEFT_DOWN
+            else -> null
+        }
+        DIR_RIGHT -> when (second) {
+            DIR_LEFT -> ConfigSpec.G_RIGHT_LEFT
+            DIR_UP -> ConfigSpec.G_RIGHT_UP
+            DIR_DOWN -> ConfigSpec.G_RIGHT_DOWN
+            else -> null
+        }
+        DIR_UP -> when (second) {
+            DIR_DOWN -> ConfigSpec.G_UP_DOWN
+            DIR_LEFT -> ConfigSpec.G_UP_LEFT
+            DIR_RIGHT -> ConfigSpec.G_UP_RIGHT
+            else -> null
+        }
+        DIR_DOWN -> when (second) {
+            DIR_UP -> ConfigSpec.G_DOWN_UP
+            DIR_LEFT -> ConfigSpec.G_DOWN_LEFT
+            DIR_RIGHT -> ConfigSpec.G_DOWN_RIGHT
+            else -> null
+        }
+        else -> null
+    }
+
+    /** 某个起始方向是否绑定了任意往返/折线手势（未绑定则单指滑动零延迟直接触发） */
+    fun hasCompoundStartingWith(first: Int): Boolean {
+        val slots = when (first) {
+            DIR_LEFT -> intArrayOf(ConfigSpec.G_LEFT_RIGHT, ConfigSpec.G_LEFT_UP, ConfigSpec.G_LEFT_DOWN)
+            DIR_RIGHT -> intArrayOf(ConfigSpec.G_RIGHT_LEFT, ConfigSpec.G_RIGHT_UP, ConfigSpec.G_RIGHT_DOWN)
+            DIR_UP -> intArrayOf(ConfigSpec.G_UP_DOWN, ConfigSpec.G_UP_LEFT, ConfigSpec.G_UP_RIGHT)
+            DIR_DOWN -> intArrayOf(ConfigSpec.G_DOWN_UP, ConfigSpec.G_DOWN_LEFT, ConfigSpec.G_DOWN_RIGHT)
+            else -> return false
+        }
+        return slots.any { actionOf(it) != ConfigSpec.ACT_NONE }
+    }
+
+    /** 单指滑动槽位对应的方向 */
+    fun singleSlideDir(slot: Int): Int = when (slot) {
+        ConfigSpec.G_SINGLE_LEFT -> DIR_LEFT
+        ConfigSpec.G_SINGLE_RIGHT -> DIR_RIGHT
+        ConfigSpec.G_SINGLE_UP -> DIR_UP
+        ConfigSpec.G_SINGLE_DOWN -> DIR_DOWN
+        else -> DIR_NONE
+    }
+
+    /** 判断两个方向是否相反（用于区分“往返”和“折线”日志） */
+    fun isOppositeDir(a: Int, b: Int): Boolean =
+        (a == DIR_LEFT && b == DIR_RIGHT) || (a == DIR_RIGHT && b == DIR_LEFT) ||
+            (a == DIR_UP && b == DIR_DOWN) || (a == DIR_DOWN && b == DIR_UP)
 
     /** 单指滑动：返回槽位，位移不够返回 null */
     fun singleSlide(dx: Float, dy: Float, minDist: Float): Int? {
@@ -108,7 +179,9 @@ object GestureMap {
     fun destructive(action: Int): Boolean = action in DESTRUCTIVE
 
     private val DESTRUCTIVE: Set<Int> = setOf(
-        ConfigSpec.ACT_DELETE_LEFT, ConfigSpec.ACT_DELETE_RIGHT, ConfigSpec.ACT_CLEAR_TEXT,
+        ConfigSpec.ACT_DELETE_LEFT, ConfigSpec.ACT_DELETE_RIGHT,
+        ConfigSpec.ACT_DELETE_PREV_SENTENCE, ConfigSpec.ACT_DELETE_NEXT_SENTENCE,
+        ConfigSpec.ACT_CLEAR_TEXT,
         ConfigSpec.ACT_CUT, ConfigSpec.ACT_PASTE, ConfigSpec.ACT_UNDO, ConfigSpec.ACT_ENTER,
         ConfigSpec.ACT_SELECT_ALL, ConfigSpec.ACT_SELECT_TEXT,
         ConfigSpec.ACT_COMMIT, ConfigSpec.ACT_CLEAR_CANDIDATE, ConfigSpec.ACT_SEND, ConfigSpec.ACT_SEND_AND_HIDE,
@@ -130,6 +203,7 @@ object GestureMap {
         ConfigSpec.ACT_DOC_START, ConfigSpec.ACT_DOC_END,
         ConfigSpec.ACT_PREV_SENTENCE, ConfigSpec.ACT_NEXT_SENTENCE,
         ConfigSpec.ACT_DELETE_LEFT, ConfigSpec.ACT_DELETE_RIGHT,
+        ConfigSpec.ACT_DELETE_PREV_SENTENCE, ConfigSpec.ACT_DELETE_NEXT_SENTENCE,
         ConfigSpec.ACT_CLEAR_TEXT, ConfigSpec.ACT_UNDO,
         ConfigSpec.ACT_SELECT_TEXT, ConfigSpec.ACT_DESELECT,
         ConfigSpec.ACT_READ_EDITOR, ConfigSpec.ACT_READ_LINE, ConfigSpec.ACT_READ_ALL,

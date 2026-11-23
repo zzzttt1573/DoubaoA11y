@@ -190,8 +190,8 @@ object ConfigSpec {
 
     // ---------------- 全屏手势 ----------------
     //
-    // 槽位和天坦输入法的全屏手势一致：单指、双指各有单击/双击/上下左右滑动，
-    // 再加八个拖动手势（按住不放，按方向连续执行）。不用九宫格，也不分左上右下。
+    // 单指、双指各有单击/双击/上下左右滑动，外加单指往返/折线手势（12 个）和八个拖动手势。
+    // 注意：0..19 的编号与键名保持不变，兼容旧版本已保存的手势设置。
 
     const val G_SINGLE_TAP = 0
     const val G_SINGLE_DOUBLE_TAP = 1
@@ -214,7 +214,23 @@ object ConfigSpec {
     const val G_DRAG2_DOWN = 18
     const val G_DOUBLE_SINGLE_TAP = 19
 
-    /** 手势槽的顺序（设置页按这个顺序列，键名也按这个顺序取） */
+    // 单指往返手势（4 个）
+    const val G_LEFT_RIGHT = 20
+    const val G_RIGHT_LEFT = 21
+    const val G_UP_DOWN = 22
+    const val G_DOWN_UP = 23
+
+    // 单指直角折线手势（8 个）
+    const val G_UP_LEFT = 24
+    const val G_UP_RIGHT = 25
+    const val G_DOWN_LEFT = 26
+    const val G_DOWN_RIGHT = 27
+    const val G_LEFT_UP = 28
+    const val G_LEFT_DOWN = 29
+    const val G_RIGHT_UP = 30
+    const val G_RIGHT_DOWN = 31
+
+    /** 手势槽的顺序（设置页按这个顺序列） */
     val GESTURE_SLOTS: List<Pair<Int, String>> = listOf(
         G_SINGLE_TAP to "单指单击",
         G_SINGLE_DOUBLE_TAP to "单指双击",
@@ -222,6 +238,18 @@ object ConfigSpec {
         G_SINGLE_RIGHT to "单指右滑",
         G_SINGLE_UP to "单指上滑",
         G_SINGLE_DOWN to "单指下滑",
+        G_LEFT_RIGHT to "左滑再右滑",
+        G_RIGHT_LEFT to "右滑再左滑",
+        G_UP_DOWN to "上滑再下滑",
+        G_DOWN_UP to "下滑再上滑",
+        G_UP_LEFT to "上滑再左滑",
+        G_UP_RIGHT to "上滑再右滑",
+        G_DOWN_LEFT to "下滑再左滑",
+        G_DOWN_RIGHT to "下滑再右滑",
+        G_LEFT_UP to "左滑再上滑",
+        G_LEFT_DOWN to "左滑再下滑",
+        G_RIGHT_UP to "右滑再上滑",
+        G_RIGHT_DOWN to "右滑再下滑",
         G_DOUBLE_SINGLE_TAP to "双指单击",
         G_DOUBLE_TAP to "双指双击",
         G_DOUBLE_LEFT to "双指左滑",
@@ -250,6 +278,9 @@ object ConfigSpec {
         "fsDragLeft", "fsDragRight", "fsDragUp", "fsDragDown",
         "fsDrag2Left", "fsDrag2Right", "fsDrag2Up", "fsDrag2Down",
         "fsDoubleSingleTap",
+        "fsLeftRight", "fsRightLeft", "fsUpDown", "fsDownUp",
+        "fsUpLeft", "fsUpRight", "fsDownLeft", "fsDownRight",
+        "fsLeftUp", "fsLeftDown", "fsRightUp", "fsRightDown",
     )
 
     fun gestureKey(slot: Int): String = gestureKeys.getOrElse(slot) { "fsSingleTap" }
@@ -317,6 +348,9 @@ object ConfigSpec {
     // 切换剪贴板历史（带序号朗读，紧接着双击可直接粘贴）
     const val ACT_PREV_CLIPBOARD = 52
     const val ACT_NEXT_CLIPBOARD = 53
+    // 按句分隔符号删除上一句/下一句
+    const val ACT_DELETE_PREV_SENTENCE = 54
+    const val ACT_DELETE_NEXT_SENTENCE = 55
 
     /**
      * 动作表：id 到名字。设置页和豆包进程都用这一份。
@@ -344,7 +378,10 @@ object ConfigSpec {
         ACT_SELECT_ALL to "全选",
         ACT_DELETE_LEFT to "删除",
         ACT_DELETE_RIGHT to "向后删除",
+        ACT_DELETE_PREV_SENTENCE to "删除上一句",
+        ACT_DELETE_NEXT_SENTENCE to "删除下一句",
         ACT_CLEAR_TEXT to "清空文本",
+        ACT_UNDO to "撤销",
         ACT_PASTE to "粘贴",
         ACT_PREV_CLIPBOARD to "上一个剪贴板",
         ACT_NEXT_CLIPBOARD to "下一个剪贴板",
@@ -362,7 +399,7 @@ object ConfigSpec {
         ACT_PREV_OPTION to "上一个编辑菜单",
         ACT_NEXT_OPTION to "下一个编辑菜单",
         ACT_RUN_OPTION to "执行当前编辑菜单",
-        ACT_DEFAULT to "双击跳转行首行尾",
+        ACT_DEFAULT to "跳到行首行尾",
     )
 
     fun actionName(id: Int): String = ACTIONS.firstOrNull { it.first == id }?.second ?: "未指定"

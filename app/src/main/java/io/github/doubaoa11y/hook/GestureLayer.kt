@@ -142,6 +142,8 @@ class GestureLayer(ctx: Context) : View(ctx) {
 
     /** 双指滑动阈值下限 18dp，避免双指点按时轻微抖动误判成双指滑动 */
     private val twoSlideSlop: Float get() = maxOf(slop, 18f * density)
+    /** 单指折线/往返第二段判定阈值：下限 22dp，防止快速抬手轻微回弹误判成往返 */
+    private val turnSlop: Float get() = maxOf(slop * 1.35f, 22f * density)
     /** 双指双击中心点容差（至少 80dp），防止两拍落点略有偏移被拒 */
     private val twoTapRadius: Float get() = maxOf(slop * 4f, 80f * density)
     /** 双指双击允许的空中间隔（第 1 拍抬手到第 2 拍按下） */
@@ -160,6 +162,11 @@ class GestureLayer(ctx: Context) : View(ctx) {
     private var maxFingers = 1
     private var fired = false
 
+    /** 单指往返/折线跟踪状态：仅当首段方向绑定了折线或往返动作时才启用 */
+    private var compoundFirstDir = GestureMap.DIR_NONE
+    private var turnX = 0f
+    private var turnY = 0f
+
     /** 拖动/滑动分离状态：有拖动动作绑定时先挂起普通滑动，短划抬手走滑动，按住进入拖动 */
     private var dragging = false
     private var dragX = 0f
@@ -175,6 +182,7 @@ class GestureLayer(ctx: Context) : View(ctx) {
         val slot = pendingDragSlot ?: return@Runnable
         if (!tracking || dragging) return@Runnable
         val how = if (maxFingers >= 2) "双指拖动" else "单指拖动"
+        compoundFirstDir = GestureMap.DIR_NONE
         pendingSlideSlot = null
         pendingDragSlot = null
         dragging = true
@@ -207,6 +215,7 @@ class GestureLayer(ctx: Context) : View(ctx) {
         main.removeCallbacks(dragStartRunner)
         dragRepeatRunner?.let { main.removeCallbacks(it) }
         dragRepeatRunner = null
+        compoundFirstDir = GestureMap.DIR_NONE
         pendingSlideSlot = null
         pendingDragSlot = null
         currentDragSlot = null
@@ -355,17 +364,28 @@ class GestureLayer(ctx: Context) : View(ctx) {
                         val dragSlot = GestureMap.dragSlot(maxFingers, dx, dy)
                         val dragAction = GestureMap.actionOf(dragSlot)
                         val how = if (maxFingers >= 2) "双指滑动" else "单指滑动"
-                        if (TwoFingerTapPolicy.shouldDeferSlideForDrag(Config.b("fsDrag"), dragAction)) {
-                            // 该方向开启了拖动：先挂起普通滑动，短划抬手才走普通滑动，按住不放则直接进入拖动
+                        val deferForDrag = TwoFingerTapPolicy.shouldDeferSlideForDrag(Config.b("fsDrag"), dragAction)
+                        val firstDir = if (maxFingers == 1) GestureMap.singleSlideDir(slideSlot) else GestureMap.DIR_NONE
+                        val deferForCompound = firstDir != GestureMap.DIR_NONE && GestureMap.hasCompoundStartingWith(firstDir)
+                        if (deferForDrag || deferForCompound) {
+                            // 拖动或单指折线/往返：先挂起普通滑动，未进入拖动也未折返则抬手走普通滑动
                             pendingSlideSlot = slideSlot
                             pendingSlideHow = how
-                            pendingDragSlot = dragSlot
-                            dragX = curX
-                            dragY = curY
-                            dragToken++
-                            val enterMs = TwoFingerTapPolicy.dragEnterDelayMs(Config.i("fsDragMs"))
-                            main.removeCallbacks(dragStartRunner)
-                            main.postDelayed(dragStartRunner, enterMs)
+                            if (deferForCompound) {
+                                compoundFirstDir = firstDir
+                                turnX = curX
+                                turnY = curY
+                            }
+                            if (deferForDrag) {
+                                pendingDragSlot = dragSlot
+                                dragX = curX
+                                dragY = curY
+                                dragToken++
+                                val baseEnterMs = TwoFingerTapPolicy.dragEnterDelayMs(Config.i("fsDragMs"))
+                                val enterMs = if (deferForCompound) maxOf(baseEnterMs, 260L) else baseEnterMs
+                                main.removeCallbacks(dragStartRunner)
+                                main.postDelayed(dragStartRunner, enterMs)
+                            }
                         } else {
                             fired = true
                             fire(slideSlot, how)
@@ -374,15 +394,51 @@ class GestureLayer(ctx: Context) : View(ctx) {
                     return true
                 }
                 if (pendingSlideSlot != null && !dragging) {
-                    val mx = curX - dragX
-                    val my = curY - dragY
-                    if (kotlin.math.abs(mx) > moveSlop || kotlin.math.abs(my) > moveSlop) {
-                        val nextDrag = GestureMap.dragSlot(maxFingers, mx, my)
-                        if (GestureMap.actionOf(nextDrag) != ConfigSpec.ACT_NONE) {
-                            pendingDragSlot = nextDrag
+                    if (compoundFirstDir != GestureMap.DIR_NONE && maxFingers == 1) {
+                        val tdx = curX - turnX
+                        val tdy = curY - turnY
+                        val advancing = when (compoundFirstDir) {
+                            GestureMap.DIR_LEFT -> curX < turnX && (turnX - curX) >= kotlin.math.abs(tdy)
+                            GestureMap.DIR_RIGHT -> curX > turnX && (curX - turnX) >= kotlin.math.abs(tdy)
+                            GestureMap.DIR_UP -> curY < turnY && (turnY - curY) >= kotlin.math.abs(tdx)
+                            GestureMap.DIR_DOWN -> curY > turnY && (curY - turnY) >= kotlin.math.abs(tdx)
+                            else -> false
                         }
-                        dragX = curX
-                        dragY = curY
+                        if (advancing) {
+                            turnX = curX
+                            turnY = curY
+                        } else {
+                            // 手指已开始明显拐弯或折返：取消待机拖动，避免转折中途被拖动抢占
+                            if (pendingDragSlot != null &&
+                                (kotlin.math.abs(tdx) >= slop * 0.7f || kotlin.math.abs(tdy) >= slop * 0.7f)
+                            ) {
+                                main.removeCallbacks(dragStartRunner)
+                                pendingDragSlot = null
+                            }
+                            val secondDir = GestureMap.directionOf(tdx, tdy, turnSlop)
+                            if (secondDir != GestureMap.DIR_NONE && secondDir != compoundFirstDir) {
+                                val compSlot = GestureMap.compoundSlot(compoundFirstDir, secondDir)
+                                if (compSlot != null && GestureMap.actionOf(compSlot) != ConfigSpec.ACT_NONE) {
+                                    val label = if (GestureMap.isOppositeDir(compoundFirstDir, secondDir)) "单指往返" else "单指折线"
+                                    stopDragTimers()
+                                    fired = true
+                                    fire(compSlot, label)
+                                    return true
+                                }
+                            }
+                        }
+                    }
+                    if (pendingDragSlot != null) {
+                        val mx = curX - dragX
+                        val my = curY - dragY
+                        if (kotlin.math.abs(mx) > moveSlop || kotlin.math.abs(my) > moveSlop) {
+                            val nextDrag = GestureMap.dragSlot(maxFingers, mx, my)
+                            if (GestureMap.actionOf(nextDrag) != ConfigSpec.ACT_NONE) {
+                                pendingDragSlot = nextDrag
+                            }
+                            dragX = curX
+                            dragY = curY
+                        }
                     }
                     return true
                 }
