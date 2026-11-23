@@ -14,7 +14,8 @@ object Speaker {
     private var am: AccessibilityManager? = null
     private var pkg = ""
     private var muteUntil = 0L
-    private var ttsRequested = false
+    @Volatile private var ttsRequested = false
+    @Volatile private var speakGen = 0L
     fun prepareTts() {
         if (!A11yState.recording || Config.b("speakByReader")) return
         ttsRequested = true
@@ -48,23 +49,28 @@ object Speaker {
 
     fun speak(text: String) {
         if (!A11yState.recording || text.isBlank() || SystemClock.uptimeMillis() < muteUntil) return
-        // 判断在当前线程做（要读瞬时状态），真正的发送丢到队列
         val byReader = Config.b("speakByReader")
-        val usePunct = !byReader && Config.b("ttsPunctuationNames")
+        // 走读屏模式时发送无障碍事件必须在主线程，直接调用即可，避免主线程 -> 工作线程 -> 主线程的无效切换
+        if (byReader) {
+            readerSay(text)
+            return
+        }
+        // 独立 TTS 需要跨进程 contentResolver.call，放到单线程队列异步执行
+        val usePunct = Config.b("ttsPunctuationNames")
+        val gen = speakGen
         speakQueue.execute {
+            if (gen != speakGen) return@execute
             try {
-                if (!byReader) {
-                    ttsRequested = true
-                    val spoken = if (usePunct) Names.punctuationText(text) else text
-                    val b = Bundle().apply { putString("text", spoken) }
-                    val ok = try {
-                        ctx?.contentResolver?.call(io.github.doubaoa11y.SettingsProvider.URI, "speak", null, b)?.getBoolean("accepted") == true
-                    } catch (t: Throwable) {
-                        L.hookError("Speaker.tts", t)
-                        false
-                    }
-                    if (ok) return@execute
+                ttsRequested = true
+                val spoken = if (usePunct) Names.punctuationText(text) else text
+                val b = Bundle().apply { putString("text", spoken) }
+                val ok = try {
+                    ctx?.contentResolver?.call(io.github.doubaoa11y.SettingsProvider.URI, "speak", null, b)?.getBoolean("accepted") == true
+                } catch (t: Throwable) {
+                    L.hookError("Speaker.tts", t)
+                    false
                 }
+                if (ok || gen != speakGen) return@execute
                 readerSay(text)
             } catch (t: Throwable) {
                 L.hookError("Speaker.speak", t)
@@ -105,6 +111,8 @@ object Speaker {
         } catch (t: Throwable) { L.hookError("Speaker.reader", t) }
     }
     fun stop() {
+        speakGen++
+        speakQueue.queue.clear()
         if (ttsRequested) {
             try { ctx?.contentResolver?.call(io.github.doubaoa11y.SettingsProvider.URI, "stop", null, null) } catch (_: Throwable) { }
             ttsRequested = false

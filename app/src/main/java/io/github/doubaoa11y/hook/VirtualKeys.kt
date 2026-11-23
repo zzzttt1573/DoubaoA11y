@@ -923,7 +923,7 @@ object VirtualKeys {
 
     /**
      * v 的屏幕左上角已由调用方给出（px, py）。
-     * 子节点坐标用它加上 child.left/top 再减滚动量推导，不再调 JNI。
+     * 子节点坐标用它加上 child.left/top、translationX/Y 再减滚动量推导，不再调 JNI。
      * 有旋转/缩放的节点退回 getLocationOnScreen，保证语义一致。
      */
     private fun findAt(v: View, rx: Float, ry: Float, px: Float, py: Float): Any? {
@@ -939,7 +939,7 @@ object VirtualKeys {
         if (!(rx >= x0 && ry >= y0 && rx < x0 + v.width && ry < y0 + v.height)) return null
         if (KeyboardViewHooks.kbClass?.isInstance(v) == true) {
             if (!v.isShown || hwSeen || EditPanel.isOpen || CustomToolbar.editing()) return null
-                        val slop = 12f * v.resources.displayMetrics.density
+            val slop = 12f * v.resources.displayMetrics.density
             val key = KeyboardViewHooks.tableOf(v)?.keyAt(rx - x0, ry - y0, slop) ?: return null
             val name = Candidates.navName(key) ?: key.speakable()
             return if (name.isBlank()) null else Target(v, key, null, name)
@@ -956,11 +956,11 @@ object VirtualKeys {
         var weak: Any? = null
         if (v is android.view.ViewGroup) {
             for (i in v.childCount - 1 downTo 0) {
-                    val c = v.getChildAt(i)
-                    // 子节点屏幕坐标 = 父节点屏幕坐标 + child.left/top - 父节点滚动量
-                    val cx = x0 + c.left - v.scrollX
-                    val cy = y0 + c.top - v.scrollY
-                    val r = findAt(c, rx, ry, cx, cy) ?: continue
+                val c = v.getChildAt(i)
+                // 子节点屏幕坐标 = 父节点屏幕坐标 + child.left/top + 平移 - 父节点滚动量
+                val cx = x0 + c.left + c.translationX - v.scrollX
+                val cy = y0 + c.top + c.translationY - v.scrollY
+                val r = findAt(c, rx, ry, cx, cy) ?: continue
                 if (r === HANDWRITE) {
                     weak = HANDWRITE
                     continue
@@ -1012,10 +1012,10 @@ object VirtualKeys {
     }
 
     /**
-     * 点是否落在控件内（热路径：find 递归时每个节点都会调）。
+     * 点是否落在控件内（hasChildAt 等路径在主线程调用）。
      *
      * 原实现每次 new IntArray(2) 并调 getLocationOnScreen。
-     * 这里复用同一个数组，避免每个节点一次分配。语义完全不变。
+     * 这里复用同一个数组，避免重复分配。语义完全不变。
      */
     private val locBuf = IntArray(2)
 
