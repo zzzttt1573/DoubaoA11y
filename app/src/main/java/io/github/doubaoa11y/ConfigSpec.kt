@@ -382,9 +382,10 @@ object ConfigSpec {
         ACT_DELETE_NEXT_SENTENCE to "删除下一句",
         ACT_CLEAR_TEXT to "清空文本",
         ACT_UNDO to "撤销",
+        ACT_CUT to "剪切",
         ACT_PASTE to "粘贴",
-        ACT_PREV_CLIPBOARD to "上一个剪贴板",
-        ACT_NEXT_CLIPBOARD to "下一个剪贴板",
+        ACT_PREV_CLIPBOARD to "上一个剪贴板（双击上屏）",
+        ACT_NEXT_CLIPBOARD to "下一个剪贴板（双击上屏）",
         ACT_SEND to "执行发送",
         ACT_SEND_AND_HIDE to "发送并收起键盘",
         ACT_HIDE to "收起键盘",
@@ -399,7 +400,7 @@ object ConfigSpec {
         ACT_PREV_OPTION to "上一个编辑菜单",
         ACT_NEXT_OPTION to "下一个编辑菜单",
         ACT_RUN_OPTION to "执行当前编辑菜单",
-        ACT_DEFAULT to "跳到行首行尾",
+        ACT_DEFAULT to "跳到开头结尾",
     )
 
     fun actionName(id: Int): String = ACTIONS.firstOrNull { it.first == id }?.second ?: "未指定"
@@ -437,8 +438,8 @@ object ConfigSpec {
         "取消选择" to ACT_DESELECT,
     )
 
-    /** 只作为动态项、绝不能手动加到基础列表的动作（剪切/复制/取消选择）。删除文本不在此列 */
-    private val DYNAMIC_ONLY_IDS: Set<Int> = setOf(ACT_CUT, ACT_COPY, ACT_DESELECT)
+    /** 只作为动态项、绝不能手动加到基础列表的动作（复制/取消选择）。删除文本与剪切不在此列 */
+    private val DYNAMIC_ONLY_IDS: Set<Int> = setOf(ACT_COPY, ACT_DESELECT)
 
     /** 动态项的名字（剪切/复制/取消选择这些不在 ACTIONS 里，单独查） */
     fun dynamicName(id: Int): String? = EDIT_OPTIONS_DYNAMIC.firstOrNull { it.second == id }?.first

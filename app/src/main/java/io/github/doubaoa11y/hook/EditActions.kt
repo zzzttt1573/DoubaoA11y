@@ -1886,6 +1886,10 @@ object EditActions {
     fun cut() {
         val ic = ic() ?: return
         val s = snapshot(ic)
+        if (s != null && s.text.isEmpty()) {
+            Speaker.speak("编辑框为空")
+            return
+        }
         val before = s?.text ?: ""
         val selected = s?.let {
             if (!it.hasSelection) "" else it.text.substring(
@@ -1893,6 +1897,10 @@ object EditActions {
                 it.indexOf(maxOf(it.start, it.end)).coerceIn(0, it.text.length),
             )
         } ?: ""
+        if (s != null && selected.isEmpty()) {
+            Speaker.speak("没有选中的文字")
+            return
+        }
         TypingEcho.suppressDeleteFor()
         val ok = try {
             ic.performContextMenuAction(android.R.id.cut)
@@ -1908,9 +1916,18 @@ object EditActions {
         ) {
             val after = snapshot(ic)?.text ?: before
             val cutDone = ok || after != before
-            if (cutDone) finishSelection()
+            if (cutDone) {
+                finishSelection()
+                main.postDelayed({ EditOptions.refresh("剪切") }, 140)
+            }
             val label = plainLabel(selected)
-            Speaker.speak(if (cutDone) GestureSpeechFormat.cut(label, selected.length) else "当前编辑框不支持剪切")
+            Speaker.speak(
+                when {
+                    cutDone -> GestureSpeechFormat.cut(label, selected.length)
+                    selected.isEmpty() -> "没有选中的文字"
+                    else -> "当前编辑框不支持剪切"
+                }
+            )
         }
     }
 
