@@ -57,9 +57,16 @@ object CharWords {
     }
 
     /** 单个汉字带字头解释：“好” → “好，好坏的好”；无解释或未开单字解释时返回 null */
-    fun explainWithChar(c: Char): String? {
-        if (!isCjk(c) || !Config.b("charExplain")) return null
+    fun explainWithChar(c: Char, force: Boolean = false): String? {
+        if (!isCjk(c) || (!force && !Config.b("charExplain"))) return null
         val w = wordOf(c) ?: return null
         return "$c，${w}的$c"
+    }
+
+    /** 仅返回单个汉字的解释部分：“好” → “好坏的好”；无解释或未开单字解释时返回 null */
+    fun explainOnly(c: Char, force: Boolean = false): String? {
+        if (!isCjk(c) || (!force && !Config.b("charExplain"))) return null
+        val w = wordOf(c) ?: return null
+        return "${w}的$c"
     }
 }

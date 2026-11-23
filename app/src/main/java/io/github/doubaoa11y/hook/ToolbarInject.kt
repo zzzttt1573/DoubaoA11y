@@ -37,14 +37,21 @@ import java.util.LinkedHashMap
 object ToolbarInject {
     const val KEY_UPPER_GESTURE = "btn_a11y_upper_gesture"
     const val KEY_EDIT_MODE = "btn_a11y_edit_mode"
+    const val KEY_CLEAR_TEXT = "btn_a11y_clear_text"
+    const val KEY_UNDO = "btn_a11y_undo"
+    const val KEY_DELETE_RIGHT = "btn_a11y_delete_right"
+    const val KEY_READ_EDITOR = "btn_a11y_read_editor"
+    const val KEY_PASTE = "btn_a11y_paste"
 
     private const val MODULE_PAGE_VIEW_TYPE = 0x5A110001
     private const val CLS_ADAPTER = "com.bytedance.android.input.keyboard.CustomToolbar.ToolbarPagerAdapter"
     private const val CLS_OPTION_ITEM = "com.bytedance.android.input.OptionItemView"
     private const val CLS_IDLE_VIEW = "com.bytedance.common_biz.tool_bar.view.views.CandidateIdleView"
     private const val TAG_OPT_PREFIX = "doubaoa11y_mod_opt_"
+    private const val READ_EDITOR_DOUBLE_CLICK_MS = 750L
 
     private val main = Handler(Looper.getMainLooper())
+    private var lastReadEditorClickAt = 0L
 
     data class CustomTool(
         val key: String,
@@ -73,6 +80,55 @@ object ToolbarInject {
                 if (A11yState.recording) EditPanel.open()
             },
         ),
+        CustomTool(
+            key = KEY_CLEAR_TEXT,
+            label = "清空编辑框",
+            configKey = "clearToolbar",
+            onClick = { _ ->
+                if (A11yState.recording) EditActions.clearText()
+            },
+        ),
+        CustomTool(
+            key = KEY_UNDO,
+            label = "撤销",
+            configKey = "undoToolbar",
+            onClick = { _ ->
+                if (A11yState.recording) EditActions.undo()
+            },
+        ),
+        CustomTool(
+            key = KEY_DELETE_RIGHT,
+            label = "向后删除",
+            configKey = "deleteRightToolbar",
+            onClick = { _ ->
+                if (A11yState.recording) EditActions.deleteRight()
+            },
+        ),
+        CustomTool(
+            key = KEY_READ_EDITOR,
+            label = "朗读编辑框",
+            configKey = "readEditorToolbar",
+            onClick = { _ ->
+                if (A11yState.recording) {
+                    val now = android.os.SystemClock.uptimeMillis()
+                    if (now - lastReadEditorClickAt in 1L..READ_EDITOR_DOUBLE_CLICK_MS) {
+                        lastReadEditorClickAt = 0L
+                        EditActions.readAllSpelled()
+                    } else {
+                        lastReadEditorClickAt = now
+                        EditActions.readAll()
+                    }
+                }
+            },
+        ),
+        CustomTool(
+            key = KEY_PASTE,
+            label = "粘贴",
+            configKey = "pasteToolbar",
+            onClick = { _ ->
+                if (A11yState.recording) EditActions.paste()
+            },
+        ),
     )
 
     private val toolMap: Map<String, CustomTool> = tools.associateBy { it.key }
@@ -84,8 +140,12 @@ object ToolbarInject {
     /** 编辑态草稿（进入定制工具栏后暂存，点完成后持久化，取消时丢弃） */
     @Volatile
     private var inEditSession = false
+    @Volatile
+    private var selfReordering = false
+    @Volatile
+    private var selfQueryingConfig = false
     private val draftEnabled = LinkedHashMap<String, Boolean>()
-    private var draftOrder: List<String>? = null
+    private var draftOrder: MutableList<String>? = null
 
     /** 豆包原生页数（由 getItemCount 动态捕获，自动兼容 2 页或未来更多页） */
     @Volatile
@@ -126,7 +186,7 @@ object ToolbarInject {
                 inEditSession = true
                 draftEnabled.clear()
                 for (t in tools) draftEnabled[t.key] = Config.b(t.configKey)
-                draftOrder = parseOrder(Config.s("toolbarCustomOrder"))
+                draftOrder = buildInitialVisibleOrder()
             }))
 
         Hooker.method(jniCls, "customizeToolbarButton",
@@ -134,6 +194,18 @@ object ToolbarInject {
             SafeHook("ToolbarInject.customizeBtn", before = { p ->
                 val visible = p.args[0] as? Boolean ?: return@SafeHook
                 val name = p.args[1] as? String ?: return@SafeHook
+                // 不论豆包原生按钮还是模块自定义按钮，一律按用户点击添加的先后顺序排到末尾；移除时从顺序表删除
+                if (A11yState.recording) {
+                    val cur = (if (inEditSession) draftOrder else parseOrder(Config.s("toolbarCustomOrder"))?.toMutableList())
+                        ?: buildInitialVisibleOrder()
+                    cur.remove(name)
+                    if (visible) cur.add(name)
+                    if (inEditSession) {
+                        draftOrder = cur
+                    } else {
+                        saveOrder(cur)
+                    }
+                }
                 val tool = toolMap[name] ?: return@SafeHook
                 p.result = null
                 if (inEditSession) {
@@ -142,18 +214,26 @@ object ToolbarInject {
                     Config.setFromIme(ServiceHooks.appContext, tool.configKey, visible)
                 }
                 L.i("定制工具栏（底层）：${if (visible) "添加" else "移除"} ${tool.label}（编辑态=$inEditSession）")
+            }, after = { p ->
+                if (!A11yState.recording) return@SafeHook
+                val name = p.args[1] as? String ?: return@SafeHook
+                if (!isCustomKey(name)) {
+                    // 原生按钮添加/移除后按新的点击顺序立即刷新顶部工具栏，避免豆包按出厂固定顺序回弹
+                    refreshToolbar()
+                }
             }))
 
         Hooker.method(jniCls, "reorderToolbarButtons", arrayOf(Array<String>::class.java),
             SafeHook("ToolbarInject.reorder", before = { p ->
+                if (selfReordering) return@SafeHook
                 @Suppress("UNCHECKED_CAST")
                 val arr = p.args[0] as? Array<String> ?: return@SafeHook
                 if (arr.none { isCustomKey(it) }) {
-                    if (inEditSession) draftOrder = arr.toList()
+                    if (inEditSession) draftOrder = arr.toMutableList()
                     return@SafeHook
                 }
                 if (inEditSession) {
-                    draftOrder = arr.toList()
+                    draftOrder = arr.toMutableList()
                 } else {
                     saveOrder(arr.toList())
                 }
@@ -162,7 +242,26 @@ object ToolbarInject {
             }))
 
         Hooker.method(jniCls, "confirmCustomizeToolbar", emptyArray(),
-            SafeHook("ToolbarInject.confirm", after = {
+            SafeHook("ToolbarInject.confirm", before = {
+                if (!inEditSession) return@SafeHook
+                val order = draftOrder ?: return@SafeHook
+                val nativeOnly = order.filter { !isCustomKey(it) }
+                if (nativeOnly.isNotEmpty()) {
+                    try {
+                        val jni = JniHooks.jni()
+                        if (jni != null) {
+                            selfReordering = true
+                            try {
+                                XposedHelpers.callMethod(jni, "reorderToolbarButtons", nativeOnly.toTypedArray())
+                            } finally {
+                                selfReordering = false
+                            }
+                        }
+                    } catch (t: Throwable) {
+                        L.hookError("ToolbarInject.confirmReorder", t)
+                    }
+                }
+            }, after = {
                 if (!inEditSession) return@SafeHook
                 val ctx = ServiceHooks.appContext
                 for (t in tools) {
@@ -173,7 +272,8 @@ object ToolbarInject {
                 inEditSession = false
                 draftEnabled.clear()
                 draftOrder = null
-                L.i("定制工具栏（底层）：已保存自定义工具配置")
+                refreshToolbar()
+                L.i("定制工具栏（底层）：已保存自定义工具配置与点击顺序")
             }))
 
         Hooker.method(jniCls, "exitCustomizeToolbar", emptyArray(),
@@ -188,12 +288,59 @@ object ToolbarInject {
 
         Hooker.method(jniCls, "getToolbarConfig", emptyArray(),
             SafeHook("ToolbarInject.getToolbarConfig", after = { p ->
-                if (!A11yState.recording) return@SafeHook
+                if (!A11yState.recording || selfQueryingConfig) return@SafeHook
                 val raw = p.result as? String ?: return@SafeHook
                 if (raw.isBlank()) return@SafeHook
                 val merged = mergeToolbarConfig(raw)
                 if (merged != null) p.result = merged
             }))
+    }
+
+    /** 进入定制工具栏时构造当前已添加按钮的有序列表，作为后续按点击先后追加的基准 */
+    private fun buildInitialVisibleOrder(): MutableList<String> {
+        val visibleSet = LinkedHashSet<String>()
+        val nativeVisible = ArrayList<Pair<String, Int>>()
+        try {
+            val jni = JniHooks.jni()
+            if (jni != null) {
+                selfQueryingConfig = true
+                val raw = try {
+                    XposedHelpers.callMethod(jni, "getToolbarConfig") as? String
+                } finally {
+                    selfQueryingConfig = false
+                }
+                if (!raw.isNullOrBlank()) {
+                    val buttons = JSONObject(raw).optJSONArray("buttons")
+                    if (buttons != null) {
+                        for (i in 0 until buttons.length()) {
+                            val o = buttons.optJSONObject(i) ?: continue
+                            val name = o.optString("name", "")
+                            if (name.isNotEmpty() && !isCustomKey(name) && o.optBoolean("visible", false)) {
+                                nativeVisible.add(name to o.optInt("order", i))
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            L.hookError("ToolbarInject.buildInitialVisibleOrder", t)
+        }
+        val nativeOrdered = nativeVisible.sortedBy { it.second }.map { it.first }
+        for (k in nativeOrdered) visibleSet.add(k)
+        for (t in tools) {
+            if (isToolEnabled(t.key)) visibleSet.add(t.key)
+        }
+        val out = ArrayList<String>(visibleSet.size)
+        val saved = parseOrder(Config.s("toolbarCustomOrder"))
+        if (!saved.isNullOrEmpty()) {
+            for (k in saved) {
+                if (k in visibleSet && k !in out) out.add(k)
+            }
+        }
+        for (k in visibleSet) {
+            if (k !in out) out.add(k)
+        }
+        return out
     }
 
     private fun mergeToolbarConfig(raw: String): String? = try {
@@ -222,50 +369,19 @@ object ToolbarInject {
         val savedOrder = if (inEditSession) draftOrder else parseOrder(Config.s("toolbarCustomOrder"))
         val ordered = ArrayList<JSONObject>(nativeList.size + customObjs.size)
         val addedKeys = HashSet<String>()
+        val nativeOrdered = nativeList.sortedBy { it.optInt("order", Int.MAX_VALUE) }
 
         if (!savedOrder.isNullOrEmpty()) {
-            // 先按原生顺序收集基准，再把 savedOrder 中自定义按钮插到对应相对位置
-            val nativeOrdered = nativeList.sortedBy { it.optInt("order", Int.MAX_VALUE) }
-            val resultKeys = ArrayList<String>(nativeOrdered.size + customObjs.size)
-            for (o in nativeOrdered) resultKeys.add(o.optString("name"))
-
-            for (customTool in tools) {
-                val idxInSaved = savedOrder.indexOf(customTool.key)
-                if (idxInSaved < 0) {
-                    resultKeys.add(customTool.key)
-                    continue
-                }
-                // 找到 savedOrder 中位于它前面的最后一个原生按钮，插在其后
-                var insertAt = 0
-                for (j in idxInSaved - 1 downTo 0) {
-                    val prevKey = savedOrder[j]
-                    val pos = resultKeys.indexOf(prevKey)
-                    if (pos >= 0) {
-                        insertAt = pos + 1
-                        break
-                    }
-                }
-                resultKeys.add(insertAt.coerceIn(0, resultKeys.size), customTool.key)
-            }
-
-            for (k in resultKeys) {
+            // 严格按照用户点击添加/调整后的先后顺序排列（原生与模块按钮统一混排）
+            for (k in savedOrder) {
                 if (!addedKeys.add(k)) continue
                 val obj = existing[k] ?: customObjs[k] ?: continue
                 ordered.add(obj)
             }
-        } else {
-            val nativeOrdered = nativeList.sortedBy { it.optInt("order", Int.MAX_VALUE) }
-            for (o in nativeOrdered) {
-                val k = o.optString("name")
-                if (addedKeys.add(k)) ordered.add(o)
-            }
-            for (t in tools) {
-                if (addedKeys.add(t.key)) customObjs[t.key]?.let { ordered.add(it) }
-            }
         }
 
-        // 兜底补齐未加入的项
-        for (o in nativeList) {
+        // 未在 savedOrder 中的剩余原生与模块按钮按原有顺序补在后面
+        for (o in nativeOrdered) {
             val k = o.optString("name")
             if (addedKeys.add(k)) ordered.add(o)
         }
@@ -862,8 +978,99 @@ object ToolbarInject {
             when (key) {
                 KEY_UPPER_GESTURE -> drawUpperGesture(canvas, rect)
                 KEY_EDIT_MODE -> drawEditMode(canvas, rect)
+                KEY_CLEAR_TEXT -> drawClearText(canvas, rect)
+                KEY_UNDO -> drawUndo(canvas, rect)
+                KEY_DELETE_RIGHT -> drawDeleteRight(canvas, rect)
+                KEY_READ_EDITOR -> drawReadEditor(canvas, rect)
+                KEY_PASTE -> drawPaste(canvas, rect)
                 else -> canvas.drawCircle(rect.centerX(), rect.centerY(), minOf(rect.width(), rect.height()) * 0.35f, strokePaint)
             }
+        }
+
+        /** 清空编辑框：简洁垃圾桶轮廓 */
+        private fun drawClearText(canvas: Canvas, rect: RectF) {
+            val w = rect.width()
+            val h = rect.height()
+            val lidY = rect.top + h * 0.24f
+            canvas.drawLine(rect.left + w * 0.1f, lidY, rect.right - w * 0.1f, lidY, strokePaint)
+            canvas.drawLine(rect.left + w * 0.36f, rect.top + h * 0.1f, rect.right - w * 0.36f, rect.top + h * 0.1f, strokePaint)
+            val body = RectF(rect.left + w * 0.2f, lidY, rect.right - w * 0.2f, rect.bottom - h * 0.08f)
+            canvas.drawRoundRect(body, 2f * density, 2f * density, strokePaint)
+            canvas.drawLine(rect.centerX() - w * 0.12f, lidY + h * 0.18f, rect.centerX() - w * 0.12f, body.bottom - h * 0.16f, strokePaint)
+            canvas.drawLine(rect.centerX() + w * 0.12f, lidY + h * 0.18f, rect.centerX() + w * 0.12f, body.bottom - h * 0.16f, strokePaint)
+        }
+
+        /** 撤销：向左回弯箭头 */
+        private fun drawUndo(canvas: Canvas, rect: RectF) {
+            val w = rect.width()
+            val h = rect.height()
+            val arc = RectF(rect.left + w * 0.18f, rect.top + h * 0.32f, rect.right - w * 0.08f, rect.bottom - h * 0.06f)
+            canvas.drawArc(arc, -90f, 180f, false, strokePaint)
+            val topY = arc.top
+            val leftX = rect.left + w * 0.16f
+            canvas.drawLine(leftX, topY, arc.centerX(), topY, strokePaint)
+            val head = w * 0.2f
+            canvas.drawLine(leftX + head, topY - head * 0.85f, leftX, topY, strokePaint)
+            canvas.drawLine(leftX + head, topY + head * 0.85f, leftX, topY, strokePaint)
+        }
+
+        /** 向后删除：尖头朝右的删除键 + 中间叉号 */
+        private fun drawDeleteRight(canvas: Canvas, rect: RectF) {
+            val w = rect.width()
+            val h = rect.height()
+            val topY = rect.top + h * 0.2f
+            val botY = rect.bottom - h * 0.2f
+            val midY = rect.centerY()
+            val tipX = rect.right - w * 0.06f
+            val neckX = rect.right - w * 0.32f
+            val leftX = rect.left + w * 0.08f
+            val path = android.graphics.Path().apply {
+                moveTo(leftX, topY)
+                lineTo(neckX, topY)
+                lineTo(tipX, midY)
+                lineTo(neckX, botY)
+                lineTo(leftX, botY)
+                close()
+            }
+            canvas.drawPath(path, strokePaint)
+            val cx = leftX + (neckX - leftX) * 0.52f
+            val arm = minOf(w, h) * 0.14f
+            canvas.drawLine(cx - arm, midY - arm, cx + arm, midY + arm, strokePaint)
+            canvas.drawLine(cx - arm, midY + arm, cx + arm, midY - arm, strokePaint)
+        }
+
+        /** 朗读编辑框：喇叭 + 两条声波弧 */
+        private fun drawReadEditor(canvas: Canvas, rect: RectF) {
+            val w = rect.width()
+            val h = rect.height()
+            val midY = rect.centerY()
+            val path = android.graphics.Path().apply {
+                moveTo(rect.left + w * 0.1f, midY - h * 0.16f)
+                lineTo(rect.left + w * 0.28f, midY - h * 0.16f)
+                lineTo(rect.left + w * 0.52f, rect.top + h * 0.16f)
+                lineTo(rect.left + w * 0.52f, rect.bottom - h * 0.16f)
+                lineTo(rect.left + w * 0.28f, midY + h * 0.16f)
+                lineTo(rect.left + w * 0.1f, midY + h * 0.16f)
+                close()
+            }
+            canvas.drawPath(path, strokePaint)
+            val r1 = w * 0.2f
+            val r2 = w * 0.35f
+            val cx = rect.left + w * 0.54f
+            canvas.drawArc(RectF(cx - r1, midY - r1, cx + r1, midY + r1), -45f, 90f, false, strokePaint)
+            canvas.drawArc(RectF(cx - r2, midY - r2, cx + r2, midY + r2), -45f, 90f, false, strokePaint)
+        }
+
+        /** 粘贴：剪贴板底板 + 顶部夹子 + 文档横线 */
+        private fun drawPaste(canvas: Canvas, rect: RectF) {
+            val w = rect.width()
+            val h = rect.height()
+            val board = RectF(rect.left + w * 0.16f, rect.top + h * 0.18f, rect.right - w * 0.16f, rect.bottom - h * 0.08f)
+            canvas.drawRoundRect(board, 2.5f * density, 2.5f * density, strokePaint)
+            val clip = RectF(rect.left + w * 0.34f, rect.top + h * 0.06f, rect.right - w * 0.34f, rect.top + h * 0.24f)
+            canvas.drawRoundRect(clip, 1.5f * density, 1.5f * density, strokePaint)
+            canvas.drawLine(board.left + w * 0.14f, board.top + h * 0.28f, board.right - w * 0.14f, board.top + h * 0.28f, strokePaint)
+            canvas.drawLine(board.left + w * 0.14f, board.top + h * 0.48f, board.right - w * 0.22f, board.top + h * 0.48f, strokePaint)
         }
 
         /** 上半屏手势：圆角屏幕框 + 上下分界线 + 上半屏十字滑动手势 */

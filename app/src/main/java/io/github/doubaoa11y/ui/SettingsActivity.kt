@@ -597,7 +597,7 @@ class SettingsActivity : Activity() {
                         if (rx != null) {
                             val ed = prefs.edit()
                             var synced = false
-                            for (k in listOf("upperOperation", "screenToolbar", "editToolbar")) {
+                            for (k in listOf("upperOperation") + ConfigSpec.TOOLBAR_TOGGLE_KEYS) {
                                 if (rx.containsKey("sync_$k")) {
                                     ed.putBoolean(k, rx.getBoolean("sync_$k"))
                                     synced = true

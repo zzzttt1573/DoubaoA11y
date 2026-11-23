@@ -80,7 +80,7 @@ object Config {
         if (now - lastPull < 800) return false
         lastPull = now
         return try {
-            for (k in listOf("upperOperation", "screenToolbar", "editToolbar")) {
+            for (k in listOf("upperOperation") + ConfigSpec.TOOLBAR_TOGGLE_KEYS) {
                 if (isDirty(k)) setFromIme(ctx, k, values[k] ?: (ConfigSpec.defaults[k] ?: false))
             }
             if (isDirty("toolbarCustomOrder")) setStrFromIme(ctx, "toolbarCustomOrder", strs["toolbarCustomOrder"] ?: "")
@@ -183,9 +183,9 @@ object Config {
     fun setFromIme(ctx: Context?, key: String, v: Boolean) {
         if (!ConfigSpec.defaults.containsKey(key)) return
         values[key] = v
-        val method = when (key) {
-            "upperOperation" -> "setUpperOperation"
-            "screenToolbar", "editToolbar" -> "setToolbar"
+        val method = when {
+            key == "upperOperation" -> "setUpperOperation"
+            key in ConfigSpec.TOOLBAR_TOGGLE_KEYS -> "setToolbar"
             else -> null
         }
         var pushed = false

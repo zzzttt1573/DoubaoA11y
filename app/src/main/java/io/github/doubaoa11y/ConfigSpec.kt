@@ -66,10 +66,26 @@ object ConfigSpec {
 
     class Item(val key: String, val label: String, val default: Boolean, val group: Group, val hint: String = "")
 
+    /** 模块在豆包定制工具栏中注册的自定义开关 key（统一供 Config / SettingsProvider / ServiceHooks 同步） */
+    val TOOLBAR_TOGGLE_KEYS: List<String> = listOf(
+        "screenToolbar",
+        "editToolbar",
+        "clearToolbar",
+        "undoToolbar",
+        "deleteRightToolbar",
+        "readEditorToolbar",
+        "pasteToolbar",
+    )
+
     val items = listOf(
         Item("upperOperation", "上半屏手势", false, Group.GESTURE),
         Item("screenToolbar", "工具栏显示上半屏手势", false, Group.INTERNAL),
         Item("editToolbar", "工具栏显示编辑模式", false, Group.INTERNAL),
+        Item("clearToolbar", "工具栏显示清空编辑框", false, Group.INTERNAL),
+        Item("undoToolbar", "工具栏显示撤销", false, Group.INTERNAL),
+        Item("deleteRightToolbar", "工具栏显示向后删除", false, Group.INTERNAL),
+        Item("readEditorToolbar", "工具栏显示朗读编辑框", false, Group.INTERNAL),
+        Item("pasteToolbar", "工具栏显示粘贴", false, Group.INTERNAL),
         Item("soundOn", "启用音效", false, Group.STATE),
         // 首页的总开关：关掉后模块什么都不做，豆包和没装模块一样
         Item("moduleOn", "模块总开关", true, Group.MAIN,

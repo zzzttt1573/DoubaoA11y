@@ -270,8 +270,9 @@ object ServiceHooks {
                             putInt("moduleVersion", ConfigSpec.MODULE_VERSION_CODE)
                             putBoolean("active", VirtualKeys.enabled)
                             putBoolean("sync_upperOperation", Config.b("upperOperation"))
-                            putBoolean("sync_screenToolbar", Config.b("screenToolbar"))
-                            putBoolean("sync_editToolbar", Config.b("editToolbar"))
+                            for (k in ConfigSpec.TOOLBAR_TOGGLE_KEYS) {
+                                putBoolean("sync_$k", Config.b(k))
+                            }
                         })
                         L.i("状态：${status(ctx)}")
                     }
@@ -296,15 +297,15 @@ object ServiceHooks {
         val logWasOn = Config.b("runLog")
         if (cmd == ConfigSpec.CMD_RESET) {
             Config.clearDirty("upperOperation")
-            Config.clearDirty("screenToolbar")
-            Config.clearDirty("editToolbar")
+            for (k in ConfigSpec.TOOLBAR_TOGGLE_KEYS) Config.clearDirty(k)
             Config.clearDirty("toolbarCustomOrder")
             Config.reset()
         }
+        val imeSyncKeys = (listOf("upperOperation") + ConfigSpec.TOOLBAR_TOGGLE_KEYS).toSet()
         if (ex != null) {
             for (item in ConfigSpec.items) {
                 if (!ex.containsKey(item.key)) continue
-                if (item.key in setOf("upperOperation", "screenToolbar", "editToolbar")) {
+                if (item.key in imeSyncKeys) {
                     if (cmd == ConfigSpec.CMD_STATUS && Config.isDirty(item.key)) {
                         Config.setFromIme(appContext, item.key, Config.b(item.key))
                         continue

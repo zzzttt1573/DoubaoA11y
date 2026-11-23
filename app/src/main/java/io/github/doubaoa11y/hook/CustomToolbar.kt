@@ -231,13 +231,15 @@ object CustomToolbar {
     // 读屏左右滑动只在弹出窗口里转，到不了键盘窗口里的工具栏，所以在弹出窗口里放一份。
 
     private fun refreshRowLater(content: View) {
-        main.postDelayed({
-            try {
-                refreshRow(content)
-            } catch (t: Throwable) {
-                L.hookError("CustomToolbar.refreshRow", t)
-            }
-        }, 350)
+        for (delay in longArrayOf(150L, 420L)) {
+            main.postDelayed({
+                try {
+                    refreshRow(content)
+                } catch (t: Throwable) {
+                    L.hookError("CustomToolbar.refreshRow", t)
+                }
+            }, delay)
+        }
     }
 
     private fun imeRoot(): View? = try {

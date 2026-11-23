@@ -15,6 +15,101 @@ import java.util.Collections
 object ViewA11yHooks {
     private val reported = Collections.synchronizedSet(HashSet<String>())
 
+    private val clipboardHiddenIds = setOf(
+        "clipboard_history_seg_btn",
+        "clipboard_history_word_seg_tip",
+        "clipboard_history_word_segmentation_container",
+        "clipboard_history_word_segmentation_layout",
+        "clipboard_history_word_segmentation_item_text",
+        "toolbar_clipboard_word_segmentation",
+        "clipboard_history_item_expand_btn",
+    )
+
+    private val clipboardWrapperIds = setOf(
+        "clipboard_history_item_scroll",
+        "clipboard_history_list_item_bg",
+        "clipboard_list_item",
+    )
+
+    private fun isClipboardHidden(v: View, info: AccessibilityNodeInfo): Boolean {
+        val simple = v.javaClass.simpleName
+        if (simple == "ClipboardSegmentationLoadingView") return true
+        var cur: Any? = v
+        var depth = 0
+        var inClipboardPanel = false
+        var collapsedDeletePanel = false
+        while (cur is View && depth < 12) {
+            val e = idName(cur)
+            if (e != null && e in clipboardHiddenIds) return true
+            // 剪贴板每条右侧隐藏的左滑抽屉（delete_panel）：未滑出时在屏幕外（可见宽度极窄），隐藏其中按钮防抢焦点与乱滚
+            if (e == "delete_panel") {
+                val r = Rect()
+                val shown = cur.getGlobalVisibleRect(r)
+                val minW = (24 * cur.resources.displayMetrics.density).toInt()
+                if (!shown || r.width() < minW) {
+                    collapsedDeletePanel = true
+                }
+            }
+            val sn = cur.javaClass.simpleName
+            if (sn == "ClipboardHistoryView" || sn == "ClipboardHistoryListView" ||
+                sn == "ClipboardCommonPhraseContainer" || e == "clipboard_history_recycler_view"
+            ) {
+                inClipboardPanel = true
+            }
+            cur = cur.parent
+            depth++
+        }
+        if (inClipboardPanel && collapsedDeletePanel) return true
+        if (inClipboardPanel) {
+            val t = (info.text ?: (v as? android.widget.TextView)?.text)?.toString()?.trim()
+            val cd = (info.contentDescription ?: v.contentDescription)?.toString()?.trim()
+            if (t == "拆词" || t == "分词" || cd == "拆词" || cd == "分词") return true
+        }
+        return false
+    }
+
+    /** 剪贴板条目外壳（如横向滑动壳）不做焦点停靠点，避免打断剪贴板条目之间的焦点跳转与垂直滚动 */
+    private fun simplifyClipboardWrapper(v: View, info: AccessibilityNodeInfo): Boolean {
+        val e = idName(v) ?: return false
+        if (e !in clipboardWrapperIds) return false
+        info.isFocusable = false
+        info.isClickable = false
+        info.isLongClickable = false
+        info.isScrollable = false
+        info.removeAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_CLICK)
+        info.removeAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_LONG_CLICK)
+        info.removeAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_FOCUS)
+        info.removeAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_ACCESSIBILITY_FOCUS)
+        info.removeAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD)
+        info.removeAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD)
+        return true
+    }
+
+    /** 焦点落到剪贴板列表条目时，确保 RecyclerView 平滑把该条目（及相邻预留空间）滚入可视区 */
+    private fun ensureClipboardItemVisible(v: View) {
+        var cur: View? = v
+        var row: View? = null
+        var rv: ViewGroup? = null
+        var depth = 0
+        while (cur != null && depth < 12) {
+            val p = cur.parent as? ViewGroup ?: break
+            if (idName(p) == "clipboard_history_recycler_view") {
+                row = cur
+                rv = p
+                break
+            }
+            cur = p
+            depth++
+        }
+        if (row == null || rv == null) return
+        try {
+            val pad = (48 * rv.resources.displayMetrics.density).toInt()
+            val rect = Rect(0, -pad, row.width.coerceAtLeast(1), row.height + pad)
+            rv.requestChildRectangleOnScreen(row, rect, false)
+        } catch (_: Throwable) {
+        }
+    }
+
     fun install() {
         Hooker.method(View::class.java, "createAccessibilityNodeInfo", arrayOf(),
             SafeHook("View.createAccessibilityNodeInfo", after = { p ->
@@ -26,6 +121,8 @@ object ViewA11yHooks {
                     ToolboxPager.isIndicator(v) -> ToolboxPager.label(v, info)
                     CustomToolbar.label(v, info) -> {}
                     Panels.covered(v) -> Panels.hide(info)
+                    isClipboardHidden(v, info) -> Panels.hide(info)
+                    simplifyClipboardWrapper(v, info) -> {}
                     else -> label(v, info)
                 }
             }))
@@ -41,12 +138,15 @@ object ViewA11yHooks {
                     p.result = null
                 }
             }))
-        // 工具箱翻页：读屏双击“下一页”/“上一页”时翻页
+        // 工具箱翻页与剪贴板焦点滚屏
         Hooker.method(View::class.java, "performAccessibilityAction", arrayOf(Int::class.javaPrimitiveType!!, android.os.Bundle::class.java),
             SafeHook("View.performAccessibilityAction", before = { p ->
                 if (!A11yState.recording) return@SafeHook
                 val v = p.thisObject as View
                 val action = p.args[0] as Int
+                if (action == AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS) {
+                    ensureClipboardItemVisible(v)
+                }
                 if (ToolboxPager.inPanel(v)) {
                     if (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD || action == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD) {
                         ToolboxPager.afterScroll(v)

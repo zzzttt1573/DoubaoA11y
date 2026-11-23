@@ -36,13 +36,11 @@ class SettingsProvider : ContentProvider() {
             "setToolbar" -> Bundle().apply {
                 val ed = p.edit()
                 var any = false
-                if (extras?.get("screenToolbar") is Boolean) {
-                    ed.putBoolean("screenToolbar", extras.getBoolean("screenToolbar"))
-                    any = true
-                }
-                if (extras?.get("editToolbar") is Boolean) {
-                    ed.putBoolean("editToolbar", extras.getBoolean("editToolbar"))
-                    any = true
+                for (k in ConfigSpec.TOOLBAR_TOGGLE_KEYS) {
+                    if (extras?.get(k) is Boolean) {
+                        ed.putBoolean(k, extras.getBoolean(k))
+                        any = true
+                    }
                 }
                 if (extras?.get("toolbarCustomOrder") is String) {
                     ed.putString("toolbarCustomOrder", extras.getString("toolbarCustomOrder").orEmpty().take(4000))

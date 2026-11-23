@@ -445,8 +445,14 @@ object EditActions {
         Speaker.hushReader()
         // 始终朗读光标前面的字符，汉字带单字解释（如“好，好坏的好”）；光标移到全文最开头时前面无字，报“已到开头”
         val seg = charBeforeCaret(s.text, target)
-        speakCharMove(seg, atStart = target <= 0)
+        speakCharMove(seg)
     }
+
+    private data class CaretChar(
+        val full: String,
+        val explainOnly: String?,
+        val atStart: Boolean,
+    )
 
     /** 上一次朗读过的字在文本里的位置（-1 = 还没念过） */
     private var lastCharIdx = -1
@@ -467,16 +473,16 @@ object EditActions {
     /**
      * 移动光标到 target 之后，取光标**前面**的一个完整字符并附带单字解释：
      * - 光标在全文最开头（target <= 0）：前面没有字符，读“已到开头”；
-     * - 单个汉字且开启单字解释：读“好，好坏的好”；
+     * - 单个汉字且开启单字解释：完整文案“好，好坏的好”，纯解释部分“好坏的好”；
      * - 标点/空白/换行/字母/数字/emoji：读符号名称或原字符。
      */
-    private fun charBeforeCaret(text: String, target: Int): String {
+    private fun charBeforeCaret(text: String, target: Int): CaretChar {
         val len = text.length
-        if (len == 0) return "编辑框为空"
+        if (len == 0) return CaretChar("编辑框为空", null, atStart = true)
         val p = target.coerceIn(0, len)
         if (p <= 0) {
             lastCharIdx = -1
-            return "已到开头"
+            return CaretChar("已到开头", null, atStart = true)
         }
         val bi = BreakIterator.getCharacterInstance(Locale.getDefault())
         bi.setText(text)
@@ -485,9 +491,11 @@ object EditActions {
         val unit = text.substring(prev, p)
         if (unit.length == 1) {
             val ch = unit[0]
-            return CharWords.explainWithChar(ch) ?: spoken(ch)
+            val explain = CharWords.explainOnly(ch)
+            val full = if (explain != null) "$ch，$explain" else spoken(ch)
+            return CaretChar(full, explain, atStart = false)
         }
-        return Names.spoken(unit)
+        return CaretChar(Names.spoken(unit), null, atStart = false)
     }
 
     /** 还没读出去的那一个字；快速连滑时被后来的覆盖，只留最后停留的那个 */
@@ -501,28 +509,46 @@ object EditActions {
 
     /**
      * 移动光标后的单字朗读：
-     * - 独立 TTS / 天坦全屏屏蔽：90ms 防抖合并，快速连滑只念最后停留的字符，无双读；
-     * - 解说/保益/点明读屏播报：对齐到 onUpdateSelection 后覆盖读屏自带的单字播报，
-     *   确保准确朗读光标前的字符及单字解释（连续滑动会自动取消前一条挂起播报）。
+     * - 独立 TTS / 天坦全屏屏蔽：读屏不念 8192，模块完整念“好，好坏的好”（90ms 防抖合并，无双读）；
+     * - 其他读屏（解说/保益/点明/TalkBack）走读屏播报时：
+     *   1. 移到全文最开头（atStart）：读屏静默，由模块补报“已到开头”；
+     *   2. 极速连滑（<=150ms）：读屏会因去抖/位差 >1 静默，停手 180ms 后由模块完整补念“好，好坏的好”；
+     *   3. 正常单步移动：读屏自己会通过 8192 先念字头“好”，模块不再重复字头“好，”，
+     *      仅在有汉字解释词时衔接补念“好坏的好”，彻底避免“好好，好坏的好”或非汉字双读。
      */
-    private fun speakCharMove(text: String, atStart: Boolean) {
-        if (!Config.b("fsSpeakChar") || text.isEmpty()) return
+    private fun speakCharMove(info: CaretChar) {
+        if (!Config.b("fsSpeakChar") || info.full.isEmpty()) return
         if (!Speaker.readerWillSpeak()) {
-            if (atStart) {
+            if (info.atStart) {
                 main.removeCallbacks(echoRunner)
                 pendingEcho = ""
-                Speaker.speak(text)
+                Speaker.speak(info.full)
                 return
             }
-            pendingEcho = text
+            pendingEcho = info.full
             main.removeCallbacks(echoRunner)
             main.postDelayed(echoRunner, 90)
             return
         }
         main.removeCallbacks(echoRunner)
         pendingEcho = ""
-        val d = cancelSelectionDelayMs()
-        scheduleAfterSelection(text, isEcho = true, afterSelMs = d, fallbackMs = SelectionOverrideTiming.fallbackMs(d))
+        cancelPendingSpeech()
+        if (info.atStart) {
+            main.removeCallbacks(burstRunner)
+            rapidMove.reset()
+            val d = cancelSelectionDelayMs()
+            scheduleAfterSelection(info.full, isEcho = true, afterSelMs = d, fallbackMs = SelectionOverrideTiming.fallbackMs(d))
+            return
+        }
+        val now = SystemClock.uptimeMillis()
+        main.removeCallbacks(burstRunner)
+        if (rapidMove.record(now, info.full)) {
+            main.postDelayed(burstRunner, 180L)
+            return
+        }
+        val explain = info.explainOnly ?: return
+        val delay = if (A11yState.readerPackage == "com.nirenr.talkman" || A11yState.readerPackage.isEmpty()) 260L else 190L
+        scheduleAfterSelection(explain, isEcho = true, afterSelMs = delay, fallbackMs = delay + 90L)
     }
 
     /**
@@ -1424,6 +1450,41 @@ object EditActions {
         Speaker.speak(t)
     }
 
+    /** 逐字解释编辑框中的每个字符（供定制工具栏“朗读编辑框”快速双击使用） */
+    fun readAllSpelled() {
+        val ic = ic() ?: return
+        val s = snapshot(ic) ?: return
+        val raw = s.text
+        if (raw.isEmpty()) {
+            Speaker.speak("编辑框为空")
+            return
+        }
+        val bi = BreakIterator.getCharacterInstance(Locale.getDefault())
+        bi.setText(raw)
+        val parts = ArrayList<String>()
+        var start = bi.first()
+        var end = bi.next()
+        while (end != BreakIterator.DONE) {
+            val unit = raw.substring(start, end)
+            val piece = if (unit.length == 1) {
+                val ch = unit[0]
+                CharWords.explainWithChar(ch, force = true) ?: spoken(ch)
+            } else {
+                Names.spoken(unit)
+            }
+            if (piece.isNotEmpty()) parts.add(piece)
+            start = end
+            end = bi.next()
+        }
+        if (parts.isEmpty()) {
+            Speaker.speak("编辑框为空")
+            return
+        }
+        Speaker.stop()
+        Speaker.unmute()
+        Speaker.echo(parts.joinToString("；"))
+    }
+
     // ---------------- 编辑 ----------------
 
     /** 删除光标左边一个字，先念被删的字再念“已删除”；选择模式下删掉选中的一段 */
@@ -1504,23 +1565,38 @@ object EditActions {
         if (t.isEmpty()) Speaker.speak("选中的是空白") else Speaker.speak("${t}，已选中")
     }
 
-    /** 撤销上一次编辑：走编辑框自己的 undo，不支持就退到“按住删除键”那种 */
+    /** 撤销上一次编辑：优先执行系统 undo，不支持时自动发送 Ctrl+Z 快捷键兜底 */
     fun undo() {
         val ic = ic() ?: return
-        val ok = try {
+        val before = snapshot(ic)?.text
+        val ctxOk = try {
             ic.performContextMenuAction(android.R.id.undo)
         } catch (t: Throwable) {
             L.hookError("EditActions.undo", t)
             false
         }
-        clearSelectionState("撤销")
-        if (ok) {
-            Speaker.speak("已撤销")
-            main.postDelayed({ readLine(quiet = true) }, 90)
-            main.postDelayed({ EditOptions.refresh("撤销") }, 140)
-        } else {
-            Speaker.speak("这个输入框不支持撤销")
+        if (!ctxOk) {
+            try {
+                val t = SystemClock.uptimeMillis()
+                val meta = KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON
+                ic.sendKeyEvent(KeyEvent(t, t, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_Z, 0, meta))
+                ic.sendKeyEvent(KeyEvent(t, t, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_Z, 0, meta))
+            } catch (t: Throwable) {
+                L.hookError("EditActions.undoCtrlZ", t)
+            }
         }
+        clearSelectionState("撤销")
+        main.postDelayed({
+            val after = snapshot(ic)?.text
+            val changed = before != null && after != null && after != before
+            if (ctxOk || changed) {
+                Speaker.speak("已撤销")
+                main.postDelayed({ readLine(quiet = true) }, 90)
+                main.postDelayed({ EditOptions.refresh("撤销") }, 140)
+            } else {
+                Speaker.speak("这个输入框不支持撤销")
+            }
+        }, 80)
     }
 
     /** 清空文本：全选再删，一次清干净 */

@@ -8,7 +8,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import java.lang.ref.WeakReference
 
 /**
- * 交给读屏处理的界面（豆包菜单、剪贴板、常用语）：用读屏焦点、左右滑动浏览。
+ * 交给读屏处理的界面（豆包菜单、剪贴板、常用语、表情键盘）：用读屏焦点、左右滑动浏览。
  * 这些界面打开时，被它盖住的工具栏、候选栏对读屏隐藏，免得焦点落到看不见的控件上。
  */
 object Panels {
@@ -21,11 +21,29 @@ object Panels {
         "ClipboardHistorySettingsView",
         "ClipboardHistoryEmptyView",
         "CommonPhraseListView",
+        "EmojiKeyboardView",
+        "EmojiPanelView",
+    )
+    private val panelIds = setOf(
+        "emoji_layout",
     )
     private val main = Handler(Looper.getMainLooper())
     private var last: WeakReference<View>? = null
 
-    fun isPanel(v: View): Boolean = v.javaClass.simpleName in names || CustomToolbar.isPanel(v)
+    private fun entryName(v: View): String? {
+        val id = v.id
+        if (id == View.NO_ID || id ushr 24 == 0) return null
+        return try {
+            v.resources.getResourceEntryName(id)
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    fun isPanel(v: View): Boolean =
+        v.javaClass.simpleName in names ||
+            entryName(v) in panelIds ||
+            CustomToolbar.isPanel(v)
 
     fun note(v: View) {
         if (last?.get() !== v) last = WeakReference(v)
