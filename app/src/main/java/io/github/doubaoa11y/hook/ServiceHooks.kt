@@ -339,6 +339,7 @@ object ServiceHooks {
         ModuleEntries.toolbar()
         ToolbarInject.refreshToolbar()
         Sound.onConfigChanged()
+        Haptic.refresh()
         if (!FullscreenMode.wanted) EditOptions.onKeyboardHidden()
         if (!A11yState.moduleOn || Config.b("speakByReader")) Speaker.stop()
         if (cmd == ConfigSpec.CMD_DUMP) {

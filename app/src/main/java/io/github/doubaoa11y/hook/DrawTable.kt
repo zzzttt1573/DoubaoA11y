@@ -264,14 +264,50 @@ class DrawTable(var windowName: String) {
     }
 
     /** 按坐标找键：先找包含该点的，再找一定距离内最近的 */
+    /**
+     * 命中测试（热路径：每次手指移动都会调）。
+     *
+     * 原实现用 filter/minByOrNull/map，34 键键盘每次摸键要分配 3~4 个集合
+     * 和 34 个 Pair。改成单趟遍历、只用局部变量，零分配。
+     * 判定规则与原实现逐字一致。
+     */
     fun keyAt(x: Float, y: Float, slop: Float): Key? {
         val ks = keys()
-        val inside = ks.filter { it.rect.contains(x.toInt(), y.toInt()) }
-            .minByOrNull { it.rect.width().toLong() * it.rect.height() }
-        if (inside != null) return inside
-        return ks.map { it to rectDist(it.rect, x, y) }
-            .filter { it.second <= slop }
-            .minByOrNull { it.second }?.first
+        if (ks.isEmpty()) return null
+        val xi = x.toInt()
+        val yi = y.toInt()
+
+        var bestIn: Key? = null
+        var bestArea = Long.MAX_VALUE
+        var i = 0
+        val n = ks.size
+        while (i < n) {
+            val k = ks[i]
+            val r = k.rect
+            if (xi >= r.left && xi < r.right && yi >= r.top && yi < r.bottom) {
+                val area = r.width().toLong() * r.height()
+                if (area < bestArea) {
+                    bestArea = area
+                    bestIn = k
+                }
+            }
+            i++
+        }
+        if (bestIn != null) return bestIn
+
+        var bestNear: Key? = null
+        var bestDist = Float.MAX_VALUE
+        i = 0
+        while (i < n) {
+            val k = ks[i]
+            val d = rectDist(k.rect, x, y)
+            if (d <= slop && d < bestDist) {
+                bestDist = d
+                bestNear = k
+            }
+            i++
+        }
+        return bestNear
     }
 
     /**

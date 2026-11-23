@@ -626,6 +626,10 @@ object VirtualKeys {
      */
     private fun scheduleSymbolScroll(root: View, kb: View, k: Key, rx: Float, ry: Float) {
         if (!Config.b("symbolScroll")) return
+        // 热路径提前挡掉：符号栏只存在于「符号键盘」里，以及竖长/横长的滚动格里。
+        // 普通字母键盘上这一整段（findSymbolBar → barKeysIn → 遍历全表）纯属白跑，
+        // 实测占每次摸键约 220us。判据只是三个字段读，不会漏掉真正的符号栏。
+        if (KeyboardState.boardName != "符号键盘" && !k.inColumn && !k.inRow) return
         val table = KeyboardViewHooks.tableOf(kb) ?: return
         val bar = findSymbolBar(table, k) ?: return
         val first = bar.keys.first()
@@ -909,14 +913,34 @@ object VirtualKeys {
      * 手写区优先级最低：同一位置有工具栏按钮、候选字时先读它们，什么都没有才算手写区。
      */
     private fun find(v: View, rx: Float, ry: Float): Any? {
+        // 只在根节点做一次 getLocationOnScreen，子树用父坐标 + child.left 递推。
+        // 原来每个节点都调一次 getLocationOnScreen（内部要沿父链累加偏移），
+        // 一次遍历 50 个节点就是 50 次跨语言调用 —— 实测这是查找耗时的主要来源。
+        val loc = IntArray(2)
+        v.getLocationOnScreen(loc)
+        return findAt(v, rx, ry, loc[0].toFloat(), loc[1].toFloat())
+    }
+
+    /**
+     * v 的屏幕左上角已由调用方给出（px, py）。
+     * 子节点坐标用它加上 child.left/top、translationX/Y 再减滚动量推导，不再调 JNI。
+     * 有旋转/缩放的节点退回 getLocationOnScreen，保证语义一致。
+     */
+    private fun findAt(v: View, rx: Float, ry: Float, px: Float, py: Float): Any? {
         if (v.visibility != View.VISIBLE || v.alpha <= 0f) return null
-        if (!contains(v, rx, ry)) return null
+        var x0 = px
+        var y0 = py
+        if (v.rotation != 0f || v.scaleX != 1f || v.scaleY != 1f) {
+            val l2 = IntArray(2)
+            v.getLocationOnScreen(l2)
+            x0 = l2[0].toFloat()
+            y0 = l2[1].toFloat()
+        }
+        if (!(rx >= x0 && ry >= y0 && rx < x0 + v.width && ry < y0 + v.height)) return null
         if (KeyboardViewHooks.kbClass?.isInstance(v) == true) {
             if (!v.isShown || hwSeen || EditPanel.isOpen || CustomToolbar.editing()) return null
-            val loc = IntArray(2)
-            v.getLocationOnScreen(loc)
             val slop = 12f * v.resources.displayMetrics.density
-            val key = KeyboardViewHooks.tableOf(v)?.keyAt(rx - loc[0], ry - loc[1], slop) ?: return null
+            val key = KeyboardViewHooks.tableOf(v)?.keyAt(rx - x0, ry - y0, slop) ?: return null
             val name = Candidates.navName(key) ?: key.speakable()
             return if (name.isBlank()) null else Target(v, key, null, name)
         }
@@ -932,7 +956,11 @@ object VirtualKeys {
         var weak: Any? = null
         if (v is android.view.ViewGroup) {
             for (i in v.childCount - 1 downTo 0) {
-                val r = find(v.getChildAt(i), rx, ry) ?: continue
+                val c = v.getChildAt(i)
+                // 子节点屏幕坐标 = 父节点屏幕坐标 + child.left/top + 平移 - 父节点滚动量
+                val cx = x0 + c.left + c.translationX - v.scrollX
+                val cy = y0 + c.top + c.translationY - v.scrollY
+                val r = findAt(c, rx, ry, cx, cy) ?: continue
                 if (r === HANDWRITE) {
                     weak = HANDWRITE
                     continue
@@ -983,8 +1011,16 @@ object VirtualKeys {
         return r.contains(rx.toInt(), ry.toInt())
     }
 
+    /**
+     * 点是否落在控件内（hasChildAt 等路径在主线程调用）。
+     *
+     * 原实现每次 new IntArray(2) 并调 getLocationOnScreen。
+     * 这里复用同一个数组，避免重复分配。语义完全不变。
+     */
+    private val locBuf = IntArray(2)
+
     private fun contains(v: View, rx: Float, ry: Float): Boolean {
-        val loc = IntArray(2)
+        val loc = locBuf
         v.getLocationOnScreen(loc)
         return rx >= loc[0] && ry >= loc[1] && rx < loc[0] + v.width && ry < loc[1] + v.height
     }

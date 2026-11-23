@@ -127,6 +127,10 @@ object Config {
             if (changed) {
                 e?.apply()
                 Sound.onConfigChanged()
+
+                // 震动效果是预计算的，配置变了要重算，否则改设置不生效
+
+                Haptic.refresh()
                 L.i("已从设置页同步配置：${summary()}")
             } else {
                 Sound.syncCustomSounds()
