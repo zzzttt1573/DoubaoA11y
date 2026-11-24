@@ -136,7 +136,7 @@ class SettingsActivity : Activity() {
         WORDS_IMPORT -> "导入解释词"
         BACKUP -> "备份与恢复"
         BACKUP_RESTORE -> "恢复备份"
-        SPONSOR -> "赞赏支持"
+        SPONSOR -> "赞赏与贡献"
         ADVANCED -> "高级"
         PATCH_WIZARD -> "注入无障碍模块"
         else -> "豆包输入法无障碍模块"

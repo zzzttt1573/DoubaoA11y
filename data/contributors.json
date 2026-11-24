@@ -1,0 +1,44 @@
+{
+  "updatedAt": "2026-11-24",
+  "notice": "感谢以下开发者为豆包输入法无障碍模块贡献代码与方案！",
+  "contributors": [
+    {
+      "name": "小牛",
+      "qq": "1656410808",
+      "github": "",
+      "githubUrl": "",
+      "contributions": [
+        "修复键盘点击出现的偶发不响应问题",
+        "对豆包输入法设置界面进行了无障碍优化",
+        "适配了豆包输入法v1.5.5"
+      ]
+    },
+    {
+      "name": "白冉洛米",
+      "qq": "3880759943",
+      "github": "",
+      "githubUrl": "",
+      "contributions": [
+        "新增了上半屏手势、独立TTS、音效方案、保益点明自动关闭触摸浏览的初步实现功能"
+      ]
+    },
+    {
+      "name": "路人甲",
+      "qq": "2996066553",
+      "github": "",
+      "githubUrl": "",
+      "contributions": [
+        "提供了对于安卓版本较低机型会闪退问题的解决方案"
+      ]
+    },
+    {
+      "name": "宋凰",
+      "qq": "1481442143",
+      "github": "weis15617-blip",
+      "githubUrl": "https://github.com/weis15617-blip",
+      "contributions": [
+        "优化了键盘区域的触摸灵敏度，并且首次通过github向作者提交拉取请求，节省了作者大量合并的工作量"
+      ]
+    }
+  ]
+}
