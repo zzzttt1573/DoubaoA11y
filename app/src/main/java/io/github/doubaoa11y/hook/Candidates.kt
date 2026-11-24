@@ -83,17 +83,41 @@ object Candidates {
 
     private val navOn: Boolean get() = VirtualKeys.enabled && Config.b("candidateNav") && composing
 
+    private val ENTER_NAMES = setOf("回车", "换行", "发送", "搜索", "完成", "下一项", "前往")
+
     /**
-     * 有候选时哪些键用来左移、右移候选：逗号、句号；九键拼音上空格左边的 123 键和右边的中英切换键。
+     * 有候选时哪些键用来左移、右移候选：
+     * - 优先按当前键盘键位表定位空格键，将与空格同一底行的左侧所有按键映射为左移，右侧按键映射为右移；
+     * - 排除竖排符号栏（inColumn）与横排分类栏（inRow）；
+     * - 回车/发送类按键由 candidateNavEnter 开关决定是否并入右移；
+     * - 若无法定位空格键，则降级回退到旧的按名称映射（全键逗号/句号，九键 123/中英）。
      * 返回 -1 左移，1 右移，0 不是这些键。
      */
-    private fun navDir(k: Key): Int {
+    private fun navDir(k: Key, keys: List<Key> = emptyList()): Int {
         if (!navOn) return 0
+        if (k.inColumn || k.inRow) return 0
         val m = k.mainName()
+        if (m == "空格") return 0
+        if (m in ENTER_NAMES && !Config.b("candidateNavEnter")) return 0
+
+        if (keys.isNotEmpty()) {
+            val space = keys.firstOrNull { it.mainName() == "空格" && !it.inColumn && !it.inRow }
+            if (space != null) {
+                val overlap = minOf(k.rect.bottom, space.rect.bottom) - maxOf(k.rect.top, space.rect.top)
+                val minH = minOf(k.rect.height(), space.rect.height())
+                if (minH > 0 && overlap * 2 >= minH) {
+                    val cx = k.rect.centerX()
+                    if (cx < space.rect.left) return -1
+                    if (cx > space.rect.right) return 1
+                }
+                return 0
+            }
+        }
+
+        // 兜底：拿不到空格键位置时按原有键名映射
         if (KeyboardState.boardName == "九键拼音") {
             if (m == "123") return -1
             if (m == "中" || k.speakable() == "英文键盘") return 1
-            // 九键左侧符号栏仍然输入符号，不能套用全键的逗号、句号映射。
             return 0
         }
         when (m) {
@@ -104,16 +128,16 @@ object Candidates {
     }
 
     /** 有候选时左移、右移键的读法；不是这些键返回 null */
-    fun navName(k: Key): String? = when (navDir(k)) {
+    fun navName(k: Key, keys: List<Key> = emptyList()): String? = when (navDir(k, keys)) {
         -1 -> "左移"
         1 -> "右移"
         else -> null
     }
 
     /** 抬手（或双击）输入一个键之前问这里；返回 true 表示模块已处理，不再把键交给豆包 */
-    fun onKey(k: Key): Boolean {
+    fun onKey(k: Key, keys: List<Key> = emptyList()): Boolean {
         if (!navOn) return false
-        val d = navDir(k)
+        val d = navDir(k, keys)
         if (d != 0) {
             move(d)
             return true

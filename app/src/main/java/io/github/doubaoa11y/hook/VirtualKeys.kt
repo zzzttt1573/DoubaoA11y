@@ -157,7 +157,7 @@ object VirtualKeys {
             info.packageName = host.context.packageName
             info.className = KEY_CLASS
             info.setParent(host)
-            info.contentDescription = Candidates.navName(k) ?: k.speakable()
+            info.contentDescription = Candidates.navName(k, s.keys) ?: k.speakable()
             info.setBoundsInParent(Rect(k.rect))
             val loc = IntArray(2)
             host.getLocationOnScreen(loc)
@@ -243,7 +243,7 @@ object VirtualKeys {
         val e = obtain(type)
         e.packageName = host.context.packageName
         e.className = KEY_CLASS
-        e.contentDescription = Candidates.navName(k) ?: k.speakable()
+        e.contentDescription = Candidates.navName(k, state(host).keys) ?: k.speakable()
         e.isEnabled = true
         e.setSource(host, id)
         send(host, e)
@@ -330,9 +330,26 @@ object VirtualKeys {
         return false
     }
 
+    private val REPEAT_SILENT_KEYS = setOf("删除", "向后删除", "左移", "右移", "上移", "下移")
+    private const val REPEAT_SILENT_WINDOW_MS = 5000L
+    private var lastSpokenKeyName = ""
+    private var lastSpokenKeyAt = 0L
+
+    /** 朗读按键/目标名称：开启“重复按键不朗读键名”时，连续按下删除、左移、右移等键只读第一次 */
+    private fun speakTargetName(name: String) {
+        val now = SystemClock.uptimeMillis()
+        val suppress = Config.b("suppressRepeatKeySpeak") &&
+            name in REPEAT_SILENT_KEYS &&
+            name == lastSpokenKeyName &&
+            now - lastSpokenKeyAt in 0L..REPEAT_SILENT_WINDOW_MS
+        lastSpokenKeyName = name
+        lastSpokenKeyAt = now
+        if (!suppress) Speaker.speak(name)
+    }
+
     private fun speakKey(v: View, s: State, id: Int) {
         val k = s.keys.getOrNull(id) ?: return
-        if (liftFor(v)) Speaker.speak(k.speakable())
+        if (liftFor(v)) speakTargetName(Candidates.navName(k, s.keys) ?: k.speakable())
         else sendKeyEvent(v, id, AccessibilityEvent.TYPE_VIEW_HOVER_ENTER)
     }
 
@@ -494,7 +511,7 @@ object VirtualKeys {
                 if (EditPanel.isOpen) L.i("编辑面板打开时摸到「${t.name}」${if (t.key != null) "（键盘键）" else t.view?.javaClass?.simpleName ?: ""}")
                 Haptic.tick()
                 Sound.play(if (t.view?.javaClass?.simpleName?.contains("Candidate") == true) "scroll" else "key")
-                Speaker.speak(t.name)
+                speakTargetName(t.name)
                 if (t.key != null && t.kb != null) {
                     scheduleHold(t.kb, t.key)
                     scheduleSymbolScroll(root, t.kb, t.key, rx, ry)
@@ -825,9 +842,10 @@ object VirtualKeys {
                 val loc = IntArray(2)
                 v.getLocationOnScreen(loc)
                 if (barTop != null && loc[1] + v.height <= barTop + 2) return
-                val hit = KeyboardViewHooks.tableOf(v)?.nearest(rx - loc[0], ry - loc[1], radius) ?: return
+                val table = KeyboardViewHooks.tableOf(v) ?: return
+                val hit = table.nearest(rx - loc[0], ry - loc[1], radius) ?: return
                 if (hit.second < bestD) {
-                    val name = Candidates.navName(hit.first) ?: hit.first.speakable()
+                    val name = Candidates.navName(hit.first, table.keys()) ?: hit.first.speakable()
                     if (name.isNotBlank()) {
                         bestD = hit.second
                         best = Target(v, hit.first, null, name)
@@ -940,8 +958,9 @@ object VirtualKeys {
         if (KeyboardViewHooks.kbClass?.isInstance(v) == true) {
             if (!v.isShown || hwSeen || EditPanel.isOpen || CustomToolbar.editing()) return null
             val slop = 12f * v.resources.displayMetrics.density
-            val key = KeyboardViewHooks.tableOf(v)?.keyAt(rx - x0, ry - y0, slop) ?: return null
-            val name = Candidates.navName(key) ?: key.speakable()
+            val table = KeyboardViewHooks.tableOf(v) ?: return null
+            val key = table.keyAt(rx - x0, ry - y0, slop) ?: return null
+            val name = Candidates.navName(key, table.keys()) ?: key.speakable()
             return if (name.isBlank()) null else Target(v, key, null, name)
         }
         if (Panels.isPanel(v)) {
@@ -1099,8 +1118,9 @@ object VirtualKeys {
     private fun scheduleHold(v: View, k: Key) {
         val total = holdMsFor(k) ?: return
         if (!Config.b("liftToType")) return
-        // 有候选时空格是上屏用的，停留不开始语音
+        // 有候选时空格是上屏用的，停留不开始语音；被映射为左移/右移的键（如回车并入右移）也不触发停留长按
         if (k.mainName() == "空格" && Candidates.composing) return
+        if (Candidates.navName(k, KeyboardViewHooks.tableOf(v)?.keys().orEmpty()) != null) return
         val r = Runnable {
             holdRunnable = null
             try {
@@ -1292,8 +1312,8 @@ object VirtualKeys {
         if (fullscreenExplore) {
             if (name == "删除") EditActions.onKeyDelete() else EditOptions.keyTyped()
         }
-        // 打拼音时逗号、句号切换候选，空格上屏选中的候选
-        if (Candidates.onKey(k)) {
+        // 有候选时底行空格两侧按键切换候选，空格上屏选中的候选
+        if (Candidates.onKey(k, KeyboardViewHooks.tableOf(v)?.keys().orEmpty())) {
             Sound.play("double")
             return
         }
@@ -1409,9 +1429,11 @@ object VirtualKeys {
             // 空格、删除、回车默认由模块处理；
             // 设置里改成豆包原生操作时，整串触摸交给豆包。用逗号句号选了别的候选时，空格仍由模块上屏那个候选
             val n = t?.key?.mainName()
+            val keyNav = t?.key != null && t.kb != null &&
+                Candidates.navName(t.key, KeyboardViewHooks.tableOf(t.kb)?.keys().orEmpty()) != null
             val native = (n == "空格" && Config.b("nativeSpace") && Candidates.sel <= 0) ||
                 (n == "删除" && Config.b("nativeDelete")) ||
-                ((n == "回车" || n == "发送") && Config.b("nativeEnter"))
+                ((n == "回车" || n == "发送") && Config.b("nativeEnter") && !keyNav)
             if (native) {
                 passThrough = true
                 cancelHold()
@@ -1423,7 +1445,7 @@ object VirtualKeys {
                 }
                 // 删除交给豆包原生处理时，多选也该跟着退出：等原生删完再核对选区
                 if (n == "删除") EditActions.onKeyDelete()
-                Speaker.speak(n)
+                speakTargetName(n)
                 L.i("直接触摸：$n 交给豆包原来的处理")
                 return false
             }
@@ -1630,6 +1652,8 @@ object VirtualKeys {
         holdView = null
         holdIsVoice = false
         spaceCancelUntil = 0L
+        lastSpokenKeyName = ""
+        lastSpokenKeyAt = 0L
         for (s in states.values) {
             s.hovered = HOST
             s.focused = HOST

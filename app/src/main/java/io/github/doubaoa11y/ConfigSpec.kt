@@ -110,13 +110,17 @@ object ConfigSpec {
         // 候选词解释
         Item("charExplain", "字词解释", true, Group.CANDIDATE),
         Item("candidateNav", "按键切换候选", true, Group.CANDIDATE,
-            "提示：开启后可用空格左右侧的两个按键切换候选字，空格上屏"),
+            "提示：有候选字时，底行空格左侧按键变为左移、右侧按键变为右移，空格上屏"),
+        Item("candidateNavEnter", "回车键并入右移候选", false, Group.CANDIDATE,
+            "提示：开启后有候选字时，回车/发送键也变为右移；关闭时保留回车/发送原功能"),
         // 键盘状态提示
         Item("announceMode", "切换键盘类型、大小写状态时提示", true, Group.STATE),
         Item("announceOnShow", "键盘弹出时朗读键盘类型", true, Group.STATE),
         Item("announceHide", "键盘关闭时提示", true, Group.STATE),
         Item("voiceZoneHint", "语音输入操作提示", true, Group.STATE,
             "提示：长按空格时左上滑动取消输入，右上滑直接发送。"),
+        Item("suppressRepeatKeySpeak", "重复按键不朗读键名", true, Group.STATE,
+            "提示：连续按下删除、左移、右移等按键时只读第一次，避免打断候选词或删除朗读"),
         // 震动
         Item("touchVibrate", "触摸震动", true, Group.VIBRATE),
         // 播报方式：和原来的“将所有播报内容交给屏幕阅读器”“开启语音”合并成一个开关

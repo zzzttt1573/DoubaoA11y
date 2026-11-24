@@ -167,13 +167,13 @@ class SettingsActivity : Activity() {
                 addGroup(root, Group.FAST)
             }
             CANDIDATE -> {
-                addKeys(root, "charExplain", "explainMaxLen", "candidateNav")
-                root.addView(note("提示：如果26键找不到右侧的右移，请在豆包输入法app内调整键盘布局"))
+                addKeys(root, "charExplain", "explainMaxLen", "candidateNav", "candidateNavEnter")
+                root.addView(note("提示：如果26键找不到右侧的右移，请在豆包输入法app内调整键盘布局，或开启“回车键并入右移候选”"))
                 WordsPage(this).fill(root)
             }
             STATE -> {
                 root.addView(heading("键盘状态提示"))
-                addKeys(root, "announceMode", "announceOnShow", "announceHide", "voiceZoneHint")
+                addKeys(root, "announceMode", "announceOnShow", "announceHide", "voiceZoneHint", "suppressRepeatKeySpeak")
                 root.addView(heading("音效"))
                 SoundPage.fill(this, root)
                 root.addView(heading("震动"))
