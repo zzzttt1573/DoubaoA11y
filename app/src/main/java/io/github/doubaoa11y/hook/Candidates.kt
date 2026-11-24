@@ -83,13 +83,17 @@ object Candidates {
 
     private val navOn: Boolean get() = VirtualKeys.enabled && Config.b("candidateNav") && composing
 
-    private val ENTER_NAMES = setOf("回车", "换行", "发送", "搜索", "完成", "下一项", "前往")
+    private val ENTER_NAMES = setOf(
+        "回车", "换行", "发送", "搜索", "完成", "下一项", "前往",
+        "确定", "确认", "提交", "下一步", "发布", "评论", "进入",
+    )
 
     /**
      * 有候选时哪些键用来左移、右移候选：
      * - 优先按当前键盘键位表定位空格键，将与空格同一底行的左侧所有按键映射为左移，右侧按键映射为右移；
      * - 排除竖排符号栏（inColumn）与横排分类栏（inRow）；
-     * - 回车/发送类按键由 candidateNavEnter 开关决定是否并入右移；
+     * - 回车/发送/确定等底行最右下角动作键由 candidateNavEnter 开关决定是否并入右移
+     *   （打拼音时豆包会把右下角键动态改为“确定”或应用自定义的动作标签，因此按“最右下角位置 + 名称”双重判定）；
      * - 若无法定位空格键，则降级回退到旧的按名称映射（全键逗号/句号，九键 123/中英）。
      * 返回 -1 左移，1 右移，0 不是这些键。
      */
@@ -98,17 +102,30 @@ object Candidates {
         if (k.inColumn || k.inRow) return 0
         val m = k.mainName()
         if (m == "空格") return 0
-        if (m in ENTER_NAMES && !Config.b("candidateNavEnter")) return 0
+        val allowEnter = Config.b("candidateNavEnter")
+        if (!allowEnter && m in ENTER_NAMES) return 0
 
         if (keys.isNotEmpty()) {
             val space = keys.firstOrNull { it.mainName() == "空格" && !it.inColumn && !it.inRow }
             if (space != null) {
-                val overlap = minOf(k.rect.bottom, space.rect.bottom) - maxOf(k.rect.top, space.rect.top)
-                val minH = minOf(k.rect.height(), space.rect.height())
-                if (minH > 0 && overlap * 2 >= minH) {
+                fun sameBottomRow(item: Key): Boolean {
+                    if (item.inColumn || item.inRow) return false
+                    val overlap = minOf(item.rect.bottom, space.rect.bottom) - maxOf(item.rect.top, space.rect.top)
+                    val minH = minOf(item.rect.height(), space.rect.height())
+                    return minH > 0 && overlap * 2 >= minH
+                }
+                if (sameBottomRow(k)) {
                     val cx = k.rect.centerX()
                     if (cx < space.rect.left) return -1
-                    if (cx > space.rect.right) return 1
+                    if (cx > space.rect.right) {
+                        if (!allowEnter) {
+                            val rightmost = keys
+                                .filter { sameBottomRow(it) && it.rect.centerX() > space.rect.right }
+                                .maxByOrNull { it.rect.right }
+                            if (rightmost != null && k.rect == rightmost.rect) return 0
+                        }
+                        return 1
+                    }
                 }
                 return 0
             }
