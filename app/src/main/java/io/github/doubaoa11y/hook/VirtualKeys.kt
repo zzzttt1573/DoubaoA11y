@@ -1329,18 +1329,36 @@ object VirtualKeys {
             val first = voiceZone.isEmpty()
             voiceZone = zone
             if (!first && Config.b("voiceZoneHint")) Speaker.speak(zone)
-            val dbg = btn?.let { dumpBoolFields(it) }.orEmpty()
-            val txtDbg = btn?.let { dumpStringFields(it) }.orEmpty()
-            L.i("语音区域：$zone（中=$centerText${if (dbg.isNotEmpty()) "，$dbg" else ""}${if (txtDbg.isNotEmpty()) "，$txtDbg" else ""}）")
+            L.i {
+                val dbg = btn?.let { dumpBoolFields(it) }.orEmpty()
+                val txtDbg = btn?.let { dumpStringFields(it) }.orEmpty()
+                "语音区域：$zone（中=$centerText${if (dbg.isNotEmpty()) "，$dbg" else ""}${if (txtDbg.isNotEmpty()) "，$txtDbg" else ""}）"
+            }
         }
     }
 
+    private class VoiceFields(type: Class<*>) {
+        val flags = listOf("r", "s", "t").associateWith { name ->
+            de.robv.android.xposed.XposedHelpers.findFieldIfExists(type, name)
+        }
+        val strings = accessibleFields(type, String::class.java)
+        val booleans = accessibleFields(type, Boolean::class.javaPrimitiveType!!)
+
+        private fun accessibleFields(type: Class<*>, fieldType: Class<*>) = try {
+            type.declaredFields.filter { it.type == fieldType }.onEach { it.isAccessible = true }
+        } catch (t: Throwable) {
+            L.hookError("VirtualKeys.voiceFields ${type.name} ${fieldType.name}", t)
+            emptyList<java.lang.reflect.Field>()
+        }
+    }
+
+    private val voiceFields = java.util.concurrent.ConcurrentHashMap<Class<*>, VoiceFields>()
+    private fun fieldsOf(o: Any) = voiceFields.computeIfAbsent(o.javaClass) { VoiceFields(it) }
+
     /** 从 asr_action_btn 内部读取左右按钮的实时中文文案（左=撤回/取消，右=发送/上屏/转文字） */
     private fun readVoiceBtnTexts(btn: Any): Pair<String, String>? = try {
-        val texts = btn.javaClass.declaredFields
-            .filter { it.type == String::class.java }
+        val texts = fieldsOf(btn).strings
             .mapNotNull { f ->
-                f.isAccessible = true
                 (f.get(btn) as? String)?.trim()?.takeIf { it.length in 2..16 && it.any { ch -> ch in '\u4e00'..'\u9fff' } }
             }
             .distinct()
@@ -1354,10 +1372,8 @@ object VirtualKeys {
     }
 
     private fun dumpStringFields(o: Any): String = try {
-        o.javaClass.declaredFields
-            .filter { it.type == String::class.java }
+        fieldsOf(o).strings
             .mapNotNull { f ->
-                f.isAccessible = true
                 val v = (f.get(o) as? String)?.trim()
                 if (v.isNullOrEmpty()) null else "${f.name}=$v"
             }
@@ -1367,10 +1383,8 @@ object VirtualKeys {
     }
 
     private fun dumpBoolFields(o: Any): String = try {
-        o.javaClass.declaredFields
-            .filter { it.type == Boolean::class.javaPrimitiveType }
+        fieldsOf(o).booleans
             .joinToString(",") { f ->
-                f.isAccessible = true
                 "${f.name}=${f.getBoolean(o)}"
             }
     } catch (_: Throwable) {
@@ -1378,7 +1392,7 @@ object VirtualKeys {
     }
 
     private fun boolField(o: Any, name: String): Boolean? = try {
-        de.robv.android.xposed.XposedHelpers.getBooleanField(o, name)
+        fieldsOf(o).flags[name]?.getBoolean(o)
     } catch (_: Throwable) {
         null
     }

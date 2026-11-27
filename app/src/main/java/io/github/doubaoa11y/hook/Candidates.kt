@@ -29,7 +29,8 @@ object Candidates {
     @Volatile
     var sel = 0
         private set
-    private var listKey = ""
+    internal data class RawSnapshot(val pinyin: String, val items: List<String>, val engineIdx: List<Int>)
+    private var lastSnapshot: RawSnapshot? = null
 
     private val origin = CandidateOriginState()
     @Volatile
@@ -251,7 +252,7 @@ object Candidates {
      * 上屏后还剩拼音的（只选了前半截），豆包会紧接着送新的候选栏，状态会再设回来。
      */
     fun install() {
-        InputHooks.onCommit { _, _ -> origin.committed(); clearView("上屏") }
+        InputHooks.onCommit { origin.committed(); clearView("上屏") }
         InputHooks.onComposing { text ->
             if (text.isBlank()) clearSession("拼音删空")
             else if (!Voice.isRecording() && !origin.isMoved()) {
@@ -290,7 +291,7 @@ object Candidates {
         engineIdx = emptyList()
         pinyin = ""
         sel = 0
-        listKey = ""
+        lastSnapshot = null
         last = ""
         loadingFrom = null
         main.removeCallbacksAndMessages(token)
@@ -299,7 +300,7 @@ object Candidates {
 
     fun onSnapshot(args: Array<Any?>) {
         @Suppress("UNCHECKED_CAST")
-        val raw = (args.firstOrNull { it is Array<*> && it.isArrayOf<String>() } as? Array<String>)?.toList().orEmpty()
+        val raw = (args.firstOrNull { it is Array<*> && it.isArrayOf<String>() } as? Array<String>).orEmpty()
         val py = args.firstOrNull { it is String } as? String ?: ""
         // 第 9 个参数是每项在引擎里的序号；“手写找字”这类入口不是候选，序号是 -1，跳过
         val idx = (args.getOrNull(8) as? IntArray)?.takeIf { it.size == raw.size }
@@ -332,10 +333,10 @@ object Candidates {
         val oldPy = pinyin
         val prevList = current
         val prevEng = engineIdx
-        val lk = py + "|" + eng.joinToString(",") + "|" + list.joinToString("|")
+        val snapshot = RawSnapshot(py, list, eng)
         val waiting = loadingFrom
-        if (lk != listKey) {
-            listKey = lk
+        if (snapshot != lastSnapshot) {
+            lastSnapshot = snapshot
             if (waiting != null && py == oldPy) {
                 val merged = CandidatePages.merge(prevList, prevEng, list, eng, hasEngineIdx = idx != null)
                 current = merged.items

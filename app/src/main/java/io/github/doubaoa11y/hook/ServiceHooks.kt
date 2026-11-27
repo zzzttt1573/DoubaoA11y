@@ -38,7 +38,6 @@ object ServiceHooks {
                 if (editorIdentity != identity || p.args[1] != true) {
                     KeyboardOps.cancelOrganizeWatch()
                     Voice.onInputEnd()
-                    TypingEcho.reset()
                     Candidates.reset("换输入框")
                     editorIdentity = identity
                 }

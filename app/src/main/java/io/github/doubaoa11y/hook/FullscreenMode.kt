@@ -152,7 +152,7 @@ object FullscreenMode {
      * 两个条件都要：输入法视图显示着（isInputViewShown），窗口也是可见的。
      * 键盘收起、应用切到后台、模块设置页打开这些情况都返回 false。
      */
-    private fun keyboardShown(): Boolean {
+    internal fun keyboardShown(): Boolean {
         return try {
             val svc = ViewA11yHooks.service ?: return false
             if (!svc.isInputViewShown) return false
@@ -454,6 +454,7 @@ object FullscreenMode {
         VirtualKeys.cancelExplore()
         unwatch()
         val l = layer
+        l?.cancelTouch()
         layer = null
         if (l != null) {
             try {

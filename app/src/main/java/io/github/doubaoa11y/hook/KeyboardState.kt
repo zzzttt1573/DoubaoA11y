@@ -104,25 +104,33 @@ object KeyboardState {
         }
         if (!speakOn || !Config.b("announceOnShow") || boardName.isEmpty()) return
         shownSaid = true
-        say(boardName, 300)
+        say(boardName, 300, onShow = true)
     }
 
     private var hideSaidAt = 0L
 
     /** 键盘收起时（可选）提示；立即读，不等。同一次收起几处都会调到，只读一次 */
     fun onHidden() {
+        main.removeCallbacksAndMessages(token)
         shownSaid = false
         if (!VirtualKeys.enabled || !Config.b("announceHide")) return
         val now = SystemClock.uptimeMillis()
         if (now - hideSaidAt < 1500) return
         hideSaidAt = now
-        main.removeCallbacksAndMessages(token)
         Speaker.speak("键盘已收起")
     }
 
-    private fun say(text: String, delay: Long) {
+    private fun say(text: String, delay: Long, onShow: Boolean = false) {
         // 稍等一下，避免被刚按的那个键的朗读打断
         main.removeCallbacksAndMessages(token)
-        main.postAtTime({ Speaker.speak(text) }, token, SystemClock.uptimeMillis() + delay)
+        main.postAtTime({
+            try {
+                if (!speakOn) return@postAtTime
+                if (onShow && (!Config.b("announceOnShow") || !FullscreenMode.keyboardShown())) return@postAtTime
+                Speaker.speak(text)
+            } catch (t: Throwable) {
+                L.hookError("KeyboardState.say", t)
+            }
+        }, token, SystemClock.uptimeMillis() + delay)
     }
 }

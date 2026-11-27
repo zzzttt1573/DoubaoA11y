@@ -25,6 +25,10 @@ object L {
         if (on) out(Log.INFO, msg, Config.b("xposedLog"))
     }
 
+    fun i(message: () -> String) {
+        if (on) out(Log.INFO, message(), Config.b("xposedLog"))
+    }
+
     /** 绘制细节等高频日志：只有打开“绘制细节也写入 LSPosed 日志”才进 LSPosed */
     fun v(msg: String) {
         if (on) out(Log.DEBUG, msg, Config.b("xposedLog") && Config.b("xposedVerbose"))

@@ -30,9 +30,9 @@ object InputHooks {
     }
 
     /** 上屏监听（后面阶段用来朗读上屏内容） */
-    private val commitListeners = ArrayList<(String, String) -> Unit>()
+    private val commitListeners = ArrayList<() -> Unit>()
 
-    fun onCommit(l: (text: String, source: String) -> Unit) {
+    fun onCommit(l: () -> Unit) {
         commitListeners.add(l)
     }
 
@@ -126,7 +126,7 @@ object InputHooks {
             if (depth != 0) return@SafeHook
             if (Config.b("logJni")) L.i(msg(p.args) + " 来源=" + caller())
             val ic = p.thisObject as? InputConnection
-            if (ic != null && name in setOf("commitText", "setComposingText", "deleteSurroundingText", "deleteSurroundingTextInCodePoints", "sendKeyEvent")) {
+            if (ic != null && (name == "commitText" || name == "setComposingText" || isDeletion(name, p.args))) {
                 p.setObjectExtra(SNAPSHOT, TypingEcho.snapshot(ic))
             }
             try {
@@ -161,7 +161,7 @@ object InputHooks {
                         EditOptions.markTyped()
                         ClipboardNav.onTyping()
                     }
-                    for (listener in commitListeners) try { listener(value, caller()) } catch (t: Throwable) { L.hookError("IC.commit", t) }
+                    for (listener in commitListeners) try { listener() } catch (t: Throwable) { L.hookError("IC.commit", t) }
                     TypingEcho.successful(ic, name, value, p.getObjectExtra(SNAPSHOT) as? TypingEcho.Snapshot)
                 }
                 "finishComposingText" -> {
@@ -169,10 +169,7 @@ object InputHooks {
                     TypingEcho.successful(ic, name, "", null)
                 }
                 "deleteSurroundingText", "deleteSurroundingTextInCodePoints", "sendKeyEvent" -> {
-                    val event = p.args.firstOrNull() as? KeyEvent
-                    val deleting = name != "sendKeyEvent" || (event?.action == KeyEvent.ACTION_DOWN &&
-                        event.keyCode in setOf(KeyEvent.KEYCODE_DEL, KeyEvent.KEYCODE_FORWARD_DEL))
-                    if (deleting) {
+                    if (isDeletion(name, p.args)) {
                         for (listener in deleteListeners) try { listener() } catch (t: Throwable) { L.hookError("IC.delete", t) }
                         noteDeleted()
                         TypingEcho.deleted(ic, p.getObjectExtra(SNAPSHOT) as? TypingEcho.Snapshot)
@@ -181,6 +178,13 @@ object InputHooks {
                 "setSelection" -> if (!Voice.isRecording() && Candidates.engineTyping() == false) Candidates.onCursorMove()
             }
         }))
+    }
+
+    private fun isDeletion(name: String, args: Array<out Any?>): Boolean {
+        if (name != "sendKeyEvent") return name == "deleteSurroundingText" || name == "deleteSurroundingTextInCodePoints"
+        val event = args.firstOrNull() as? KeyEvent ?: return false
+        return event.action == KeyEvent.ACTION_DOWN &&
+            (event.keyCode == KeyEvent.KEYCODE_DEL || event.keyCode == KeyEvent.KEYCODE_FORWARD_DEL)
     }
 
     /** 调用栈里豆包自己的前几层，用来区分键盘、手写、语音上屏 */

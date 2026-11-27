@@ -24,10 +24,9 @@ object Voice {
     private var recording = false
     private var stopAt = 0L
     private var sessionUntil = 0L
-    private var lastComposing = ""
     private var spoken = false
     private val echoGate = VoiceEchoGate()
-    private var echoToken = 0L
+    @Volatile private var echoToken = 0L
     private var confirmedWritten = ""
     private var expectedFinalCommit: String? = null
 
@@ -39,7 +38,6 @@ object Voice {
         Hooker.method(AudioRecord::class.java, "stop", arrayOf(), SafeHook("AudioRecord.stop", after = { p ->
             if (p.throwable == null) onStop()
         }))
-        InputHooks.onComposing { text -> onComposing(text) }
         InputHooks.onFinishComposing { onFinish() }
     }
 
@@ -49,7 +47,7 @@ object Voice {
     private var heldIc: InputConnection? = null
     private var flushing = false
     private val flushToken = Any()
-    private var dropUntil = 0L
+    @Volatile private var dropUntil = 0L
 
     /**
      * 翻译模式：豆包把原文的中间结果写进编辑框，说完后自己再把原文写一遍、换成译文。
@@ -153,20 +151,19 @@ object Voice {
         held = null
         confirmedWritten = ""
         expectedFinalCommit = null
-        echoGate.cancel()
-        lastComposing = ""
+        cancelFinalSpeech()
         spoken = true
         dropUntil = if (buffering) SystemClock.uptimeMillis() + 1500 else 0L
-        main.removeCallbacksAndMessages(token)
         end("撤回")
     }
 
     /** 键盘收起、换输入框：把留着的写进去 */
     fun onInputEnd() {
+        dropUntil = 0L
         if (buffering) { flush("收起"); end("收起") }
         expectedFinalCommit = null
         confirmedWritten = ""
-        echoGate.cancel()
+        cancelFinalSpeech()
         sessionUntil = 0L
         TypingEcho.reset()
     }
@@ -202,7 +199,10 @@ object Voice {
         if (recording) return
         Sound.play("voice")
         recording = true
-        echoToken = echoGate.begin()
+        synchronized(echoGate) {
+            main.removeCallbacksAndMessages(token)
+            echoToken = echoGate.begin()
+        }
         confirmedWritten = ""
         expectedFinalCommit = null
         dropUntil = 0L
@@ -220,7 +220,6 @@ object Voice {
             held = null
             if (translating) L.i("翻译模式：说完再上屏，等译文")
         }
-        lastComposing = ""
         spoken = false
         sessionUntil = Long.MAX_VALUE
         L.i("语音：开始录音")
@@ -236,6 +235,7 @@ object Voice {
     }
 
     private fun onStop() {
+        val generation = echoToken
         if (!recording) return
         recording = false
         KeyboardOps.onVoiceStopped()
@@ -244,8 +244,7 @@ object Voice {
         L.i("语音：结束录音")
         if (buffering) scheduleFlush()
         // 识别结果一般很快上屏；如果只留在组字里，过一会儿也读出来
-        main.removeCallbacksAndMessages(token)
-        main.postAtTime({ speakFinal("超时") }, token, stopAt + 2500)
+        scheduleFinal("超时", stopAt + 2500, generation)
     }
 
     fun isRecording(): Boolean = recording
@@ -256,24 +255,43 @@ object Voice {
 
     private fun inSession(): Boolean = recording || SystemClock.uptimeMillis() < sessionUntil
 
-    private fun onComposing(text: String) {
-        if (inSession()) lastComposing = text
-    }
-
     private fun onFinish() {
+        val generation = echoToken
         if (!inSession() || recording) return
-        main.removeCallbacksAndMessages(token)
-        main.postAtTime({ speakFinal("结束组字") }, token, SystemClock.uptimeMillis() + 150)
+        scheduleFinal("结束组字", SystemClock.uptimeMillis() + 150, generation)
     }
 
-    private fun speakFinal(why: String) {
-        if (spoken) return
-        val t = confirmedWritten.trim()
-        if (t.isEmpty()) return
-        spoken = true
-        sessionUntil = 0
+    private fun cancelFinalSpeech() = synchronized(echoGate) {
+        echoGate.cancel()
+        echoToken = 0L
         main.removeCallbacksAndMessages(token)
+    }
+
+    private fun scheduleFinal(why: String, at: Long, generation: Long) {
+        synchronized(echoGate) {
+            if (generation == 0L || generation != echoToken) return
+            main.removeCallbacksAndMessages(token)
+            main.postAtTime({
+                try {
+                    speakFinal(why, generation)
+                } catch (t: Throwable) {
+                    L.hookError("Voice.finalSpeech", t)
+                }
+            }, token, at)
+        }
+    }
+
+    private fun speakFinal(why: String, generation: Long = echoToken) {
+        val t = synchronized(echoGate) {
+            if (spoken || generation != echoToken) return
+            val text = confirmedWritten.trim()
+            if (text.isEmpty() || !echoGate.accept(generation)) return
+            spoken = true
+            sessionUntil = 0
+            main.removeCallbacksAndMessages(token)
+            text
+        }
         L.i("语音识别结果（$why）：「$t」")
-        if (echoGate.accept(echoToken)) TypingEcho.voiceResult(t)
+        TypingEcho.voiceResult(t)
     }
 }

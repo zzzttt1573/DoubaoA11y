@@ -279,6 +279,16 @@ class GestureLayer(ctx: Context) : View(ctx) {
         main.removeCallbacks(twoTapExpireRunner)
     }
 
+    override fun onDetachedFromWindow() {
+        try {
+            cancelTouch()
+        } catch (t: Throwable) {
+            L.hookError("GestureLayer.detach", t)
+        } finally {
+            super.onDetachedFromWindow()
+        }
+    }
+
     /** 一次手势作废（手指划出了手势区、或者被别的层接管）：不执行、不留状态 */
     fun cancelTouch() {
         tracking = false
