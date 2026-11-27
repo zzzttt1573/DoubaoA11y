@@ -43,7 +43,9 @@ object Sound {
     private val ids = HashMap<String, Int>()
     private val ready = HashSet<Int>()
     private var stream = 0
-    private var pending: Triple<Int, Float, Long>? = null
+    private data class Pending(val id: Int, val volume: Float, val at: Long, val sequence: Long)
+    private var pending: Pending? = null
+    @Volatile private var sequence = 0L
     private var last = 0L
     private var lastEvent = ""
 
@@ -86,7 +88,7 @@ object Sound {
         }
     }
 
-    fun play(event: String) {
+    @Synchronized fun play(event: String) {
         if (!A11yState.recording || !Config.b("soundOn")) return
         if (event !in SoundEngine.events) return
         val now = SystemClock.uptimeMillis()
@@ -102,6 +104,7 @@ object Sound {
         val c = context ?: return
         val volume = Config.i("soundVolume").coerceIn(0, 100) / 100f
         if (volume <= 0f) return
+        val request = ++sequence
         val selected = selectedFor(c, event)
         val fallbackSlot = selected.removePrefix("builtin.").takeIf { it in SoundEngine.slots }
             ?: event.takeIf { it in SoundEngine.slots } ?: "key"
@@ -114,15 +117,16 @@ object Sound {
         if (!selected.startsWith("builtin.") && ZipBackup.validSlot(selected)) {
             val cached = customFile(c, selected)
             if (cached.isFile && cached.length() > 0L) {
-                main.post { playCustomOrFallback(c, cached, fallbackSlot, wantUsage, volume) }
+                main.post { playCustomOrFallback(request, c, cached, fallbackSlot, wantUsage, volume) }
             } else {
                 worker.execute {
+                    if (request != sequence) return@execute
                     val fetched = fetchCustom(c, selected)
                     main.post {
                         if (fetched != null && fetched.isFile && fetched.length() > 0L) {
-                            playCustomOrFallback(c, fetched, fallbackSlot, wantUsage, volume)
+                            playCustomOrFallback(request, c, fetched, fallbackSlot, wantUsage, volume)
                         } else {
-                            playBuiltin(c, fallbackSlot, wantUsage, volume)
+                            playBuiltin(request, c, fallbackSlot, wantUsage, volume)
                         }
                     }
                 }
@@ -130,7 +134,7 @@ object Sound {
             return
         }
 
-        main.post { playBuiltin(c, fallbackSlot, wantUsage, volume) }
+        main.post { playBuiltin(request, c, fallbackSlot, wantUsage, volume) }
     }
 
     private fun selectedFor(c: Context, event: String): String {
@@ -145,7 +149,8 @@ object Sound {
         return if (customFile(c, old).isFile) old else "builtin.$old"
     }
 
-    private fun playCustomOrFallback(c: Context, file: File, fallbackSlot: String, wantUsage: Int, volume: Float) {
+    private fun playCustomOrFallback(request: Long, c: Context, file: File, fallbackSlot: String, wantUsage: Int, volume: Float) {
+        if (request != sequence) return
         if (!A11yState.recording || !Config.b("soundOn")) {
             stopNow()
             return
@@ -164,7 +169,7 @@ object Sound {
             p.setDataSource(file.absolutePath)
             p.setOnPreparedListener {
                 try {
-                    if (player === it) it.start() else it.release()
+                    if (player === it && request == sequence) it.start() else if (player === it) stopNow()
                 } catch (_: Throwable) {
                     if (player === p) stopNow()
                 }
@@ -173,7 +178,7 @@ object Sound {
             p.setOnErrorListener { _, _, _ ->
                 if (player === p) {
                     stopNow()
-                    playBuiltin(c, fallbackSlot, wantUsage, volume)
+                    playBuiltin(request, c, fallbackSlot, wantUsage, volume)
                 }
                 true
             }
@@ -181,11 +186,12 @@ object Sound {
             main.postDelayed({ if (player === p) stopNow() }, 5500)
         } catch (_: Throwable) {
             stopNow()
-            playBuiltin(c, fallbackSlot, wantUsage, volume)
+            playBuiltin(request, c, fallbackSlot, wantUsage, volume)
         }
     }
 
-    private fun playBuiltin(c: Context, slot: String, wantUsage: Int, volume: Float) {
+    private fun playBuiltin(request: Long, c: Context, slot: String, wantUsage: Int, volume: Float) {
+        if (request != sequence) return
         if (!A11yState.recording || !Config.b("soundOn")) {
             stopNow()
             return
@@ -212,10 +218,10 @@ object Sound {
                             main.post {
                                 if (pool === p && status == 0) {
                                     ready.add(id)
-                                    pending?.takeIf { it.first == id }?.let { request ->
+                                    pending?.takeIf { it.id == id && it.sequence == sequence }?.let { request ->
                                         pending = null
-                                        if (SystemClock.uptimeMillis() - request.third < 600) {
-                                            stream = p.play(id, request.second, request.second, 1, 0, 1f)
+                                        if (SystemClock.uptimeMillis() - request.at < 600) {
+                                            stream = p.play(id, request.volume, request.volume, 1, 0, 1f)
                                         }
                                     }
                                 }
@@ -229,7 +235,7 @@ object Sound {
                 if (existingId in ready) {
                     stream = p.play(existingId, volume, volume, 1, 0, 1f)
                 } else {
-                    pending = Triple(existingId, volume, SystemClock.uptimeMillis())
+                    pending = Pending(existingId, volume, SystemClock.uptimeMillis(), request)
                 }
                 return
             }
@@ -237,7 +243,7 @@ object Sound {
             val loadedId = p.load(file.absolutePath, 1)
             if (loadedId != 0) {
                 ids[slot] = loadedId
-                pending = Triple(loadedId, volume, SystemClock.uptimeMillis())
+                pending = Pending(loadedId, volume, SystemClock.uptimeMillis(), request)
             }
         } catch (t: Throwable) {
             pending = null
@@ -397,7 +403,9 @@ object Sound {
         stream = 0
     }
 
-    fun stop() {
+    @Synchronized fun stop() {
+        sequence++
+        // play 与 stop 串行入队；后来的播放会在本次清理之后执行。
         if (Looper.myLooper() == Looper.getMainLooper()) stopNow() else main.post { stopNow() }
     }
 }

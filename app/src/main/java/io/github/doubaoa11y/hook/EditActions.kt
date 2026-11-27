@@ -304,6 +304,7 @@ object EditActions {
      * 这里照做——想接着选，展开后重新执行“选择文本”就行，成本很低。
      */
     fun onWindowHidden() {
+        selectionGeneration++
         resetEcho()
         if (!selecting) return
         val ic = ic()
@@ -778,6 +779,23 @@ object EditActions {
         }
     }
 
+    private inline fun <T> batch(ic: InputConnection, action: () -> T): T {
+        ic.beginBatchEdit()
+        return try {
+            action()
+        } finally {
+            ic.endBatchEdit()
+        }
+    }
+
+    private fun postEdit(ic: InputConnection, generation: Long, delay: Long, action: () -> kotlin.Unit) {
+        main.postDelayed({
+            if (generation == selectionGeneration && ic === this.ic()) {
+                try { action() } catch (t: Throwable) { L.hookError("EditActions.postEdit", t) }
+            }
+        }, delay)
+    }
+
     /**
      * 把编辑框里的选区收成一个光标。返回 true 表示真的收掉了（原来有选中）。
      *
@@ -792,29 +810,28 @@ object EditActions {
         val base = s.offset
         val lo = base + s.indexOf(minOf(s.start, s.end))
         val hi = base + s.indexOf(maxOf(s.start, s.end))
+        val generation = selectionGeneration
         val p = if (prefer in lo..hi) prefer else hi
         try {
             // 套一层 batchEdit：部分编辑框（Flutter、自绘输入框）不套 batch 就不认 setSelection 的选区变更
-            ic.beginBatchEdit()
-            ic.setSelection(p, p)
-            ic.endBatchEdit()
+            batch(ic) { ic.setSelection(p, p) }
         } catch (t: Throwable) {
             L.hookError("collapseSelection.setSelection", t)
         }
-        main.postDelayed({
+        postEdit(ic, generation, 90) {
             val a = snapshot(ic)
-            if (a != null && a.hasSelection) {
+            if (a != null && a.start == s.start && a.end == s.end && a.text == s.text) {
                 L.w("退出选择态后编辑框还有选区（$why），改用方向键收掉")
                 sendArrowCollapse(ic, a)
-                main.postDelayed({
+                postEdit(ic, generation, 130) {
                     if (snapshot(ic)?.hasSelection == true) {
                         L.w("编辑框不给改选区（$why），只能等它自己取消")
                     } else {
                         L.i("方向键收掉了选区（$why）")
                     }
-                }, 130)
+                }
             }
-        }, 90)
+        }
         return true
     }
 
@@ -1625,10 +1642,18 @@ object EditActions {
         }
         if (!deleted) {
             try {
-                ic.beginBatchEdit()
-                ic.setSelection(s.offset + lo, s.offset + hi)
-                ic.commitText("", 1)
-                ic.endBatchEdit()
+                val start = s.offset + lo
+                val end = s.offset + hi
+                val committed = batch(ic) {
+                    val selected = ic.setSelection(start, end) || snapshot(ic)?.let {
+                        minOf(it.start, it.end) == start && maxOf(it.start, it.end) == end
+                    } == true
+                    selected && ic.commitText("", 1)
+                }
+                if (!committed) {
+                    L.w("编辑框未确认删除（$reason）")
+                    return
+                }
             } catch (t: Throwable) {
                 L.hookError("EditActions.$reason", t)
                 return
@@ -1702,37 +1727,38 @@ object EditActions {
             sendCtrlZ(ic)
         }
         clearSelectionState("撤销")
-        main.postDelayed({
+        val generation = selectionGeneration
+        postEdit(ic, generation, 70) {
             val after = snapshot(ic)?.text
             val changed = before != null && after != null && after != before
             if (changed) {
                 Speaker.speak("已撤销")
-                main.postDelayed({ readLine(quiet = true) }, 90)
-                main.postDelayed({ EditOptions.refresh("撤销") }, 140)
-                return@postDelayed
+                postEdit(ic, generation, 90) { readLine(quiet = true) }
+                postEdit(ic, generation, 140) { EditOptions.refresh("撤销") }
+                return@postEdit
             }
             if (ctxOk && before != null) {
                 // 部分编辑框 performContextMenuAction(undo) 返回 true 但未实际改动文本，补发一次 Ctrl+Z
                 sendCtrlZ(ic)
-                main.postDelayed({
+                postEdit(ic, generation, 70) {
                     val after2 = snapshot(ic)?.text
                     val changed2 = after2 != null && after2 != before
                     if (changed2) {
                         Speaker.speak("已撤销")
-                        main.postDelayed({ readLine(quiet = true) }, 90)
-                        main.postDelayed({ EditOptions.refresh("撤销") }, 140)
+                        postEdit(ic, generation, 90) { readLine(quiet = true) }
+                        postEdit(ic, generation, 140) { EditOptions.refresh("撤销") }
                     } else {
                         Speaker.speak("没有可撤销的内容")
                     }
-                }, 70)
+                }
             } else if (ctxOk || before == null) {
                 Speaker.speak("已撤销")
-                main.postDelayed({ readLine(quiet = true) }, 90)
-                main.postDelayed({ EditOptions.refresh("撤销") }, 140)
+                postEdit(ic, generation, 90) { readLine(quiet = true) }
+                postEdit(ic, generation, 140) { EditOptions.refresh("撤销") }
             } else {
                 Speaker.speak("这个输入框不支持撤销")
             }
-        }, 70)
+        }
     }
 
     /** 清空文本：全选再删，一次清干净 */

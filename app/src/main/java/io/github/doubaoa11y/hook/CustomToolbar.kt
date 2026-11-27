@@ -179,10 +179,11 @@ object CustomToolbar {
         VirtualKeys.cancelExplore()
         TouchGuard.syncPanel()
         FullscreenMode.syncPanelVisibility()
-        w.setOnDismissListener(wrapDismiss(w))
+        installDismiss(w, content)
 
         main.postDelayed({
             try {
+                if (popup?.get() !== w || !w.isShowing) return@postDelayed
                 TouchGuard.syncPanel()
                 FullscreenMode.syncPanelVisibility()
                 refreshRow(content)
@@ -192,6 +193,7 @@ object CustomToolbar {
         }, 200)
         main.postDelayed({
             try {
+                if (popup?.get() !== w || !w.isShowing) return@postDelayed
                 TouchGuard.syncPanel()
                 FullscreenMode.syncPanelVisibility()
                 val panel = content.parent as? View ?: return@postDelayed
@@ -203,28 +205,49 @@ object CustomToolbar {
     }
 
     /** 定制工具栏关掉后恢复穿透（保留豆包自己的关闭回调） */
-    private fun wrapDismiss(w: PopupWindow): PopupWindow.OnDismissListener {
-        val old = try {
-            val f = PopupWindow::class.java.getDeclaredField("mOnDismissListener")
-            f.isAccessible = true
-            f.get(w) as? PopupWindow.OnDismissListener
-        } catch (_: Throwable) {
-            null
+    private class Dismiss(val original: PopupWindow.OnDismissListener?, val window: PopupWindow) :
+        PopupWindow.OnDismissListener {
+        override fun onDismiss() {
+            try { original?.onDismiss() } finally { dismissed(window) }
         }
-        return PopupWindow.OnDismissListener {
+    }
+
+    private fun installDismiss(w: PopupWindow, content: View) {
+        val old = try {
+            val field = PopupWindow::class.java.getDeclaredField("mOnDismissListener")
+            field.isAccessible = true
+            field.get(w) as PopupWindow.OnDismissListener?
+        } catch (t: Throwable) {
+            L.hookError("CustomToolbar.readDismiss", t)
+            if (detachFallback[content]?.get() === w) return
+            detachFallback[content] = WeakReference(w)
+            content.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+                override fun onViewAttachedToWindow(v: View) = Unit
+                override fun onViewDetachedFromWindow(v: View) {
+                    v.removeOnAttachStateChangeListener(this)
+                    if (detachFallback[v]?.get() === w) detachFallback.remove(v)
+                    dismissed(w)
+                }
+            })
+            return
+        }
+        if (old !is Dismiss || old.window !== w) w.setOnDismissListener(Dismiss(old, w))
+    }
+
+    private val detachFallback = java.util.WeakHashMap<View, WeakReference<PopupWindow>>()
+
+    private fun dismissed(w: PopupWindow) {
+        if (popup?.get() !== w) return
+        popup = null
+        current = null
+        fun refresh() {
             try {
-                old?.onDismiss()
-            } finally {
-                popup = null
-                current = null
                 TouchGuard.syncPanel()
                 FullscreenMode.syncPanelVisibility()
-                main.postDelayed({
-                    TouchGuard.syncPanel()
-                    FullscreenMode.syncPanelVisibility()
-                }, 200)
-            }
+            } catch (t: Throwable) { L.hookError("CustomToolbar.dismiss", t) }
         }
+        refresh()
+        main.postDelayed({ if (popup?.get() == null) refresh() }, 200)
     }
 
     // ---- 弹出窗口顶部的一排代理按钮：对应键盘上方工具栏的“完成”和已添加的工具 ----

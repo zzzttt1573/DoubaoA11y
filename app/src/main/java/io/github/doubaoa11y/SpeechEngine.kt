@@ -157,7 +157,9 @@ object SpeechEngine {
         generation++
         starting = false
         ready = false
-        try { engine?.stop(); engine?.shutdown() } catch (_: Throwable) { }
+        val old = engine
         engine = null
+        try { old?.stop() } catch (t: Throwable) { android.util.Log.w("DoubaoA11y", "停止旧语音引擎失败", t) }
+        try { old?.shutdown() } catch (t: Throwable) { android.util.Log.w("DoubaoA11y", "释放旧语音引擎失败", t) }
     }
 }

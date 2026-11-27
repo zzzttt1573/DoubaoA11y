@@ -23,21 +23,8 @@ object CharWords {
     private fun wordOf(ch: String): String? =
         Config.customWords[ch] ?: if (ch.length == 1) map[ch[0]] else null
 
-    fun isHanCodePoint(cp: Int): Boolean =
-        cp == 0x3007 ||
-            cp in 0x3400..0x4DBF ||
-            cp in 0x4E00..0x9FFF ||
-            cp in 0xF900..0xFAFF ||
-            cp in 0x20000..0x2A6DF ||
-            cp in 0x2A700..0x2EBEF ||
-            cp in 0x2F800..0x2FA1F ||
-            cp in 0x30000..0x323AF
-
-    fun isSingleHan(s: String): Boolean {
-        if (s.isEmpty()) return false
-        val cp = s.codePointAt(0)
-        return Character.charCount(cp) == s.length && isHanCodePoint(cp)
-    }
+    fun isHanCodePoint(cp: Int) = io.github.doubaoa11y.Han.isHanCodePoint(cp)
+    fun isSingleHan(key: String) = io.github.doubaoa11y.Han.isSingleHan(key)
 
     fun isCjk(c: Char): Boolean = isHanCodePoint(c.code)
 

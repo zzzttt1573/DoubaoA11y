@@ -45,29 +45,38 @@ object StepSlider {
             }))
     }
 
-    private fun steps(v: View): List<*>? {
-        try {
-            (XposedHelpers.getObjectField(v, "l") as? List<*>)?.let { return it }
-        } catch (_: Throwable) {
+    private class Members(val type: Class<*>) {
+        val list = XposedHelpers.findFieldIfExists(type, "l")
+        val getter = generateSequence<Class<*>>(type) { it.superclass }.mapNotNull {
+            XposedHelpers.findMethodExactIfExists(it, "getCurrentStep")
+        }.firstOrNull()
+        val alternatives by lazy {
+            generateSequence<Class<*>>(type) { it.superclass }.takeWhile { it != View::class.java }
+                .flatMap { it.declaredFields.asSequence() }
+                .filter { List::class.java.isAssignableFrom(it.type) }
+                .filter { field -> runCatching { field.isAccessible = true }.isSuccess }.toList()
         }
-        // 字段名混淆后变了：找第一个 List 字段
-        var c: Class<*>? = v.javaClass
-        while (c != null && c != View::class.java) {
-            for (f in c.declaredFields) {
-                if (List::class.java.isAssignableFrom(f.type)) {
-                    f.isAccessible = true
-                    (f.get(v) as? List<*>)?.let { return it }
-                }
-            }
-            c = c.superclass
+        private val warnings = HashSet<String>()
+        @Synchronized fun warn(reason: String) {
+            if (warnings.add(reason)) L.w("分档滑块 ${type.name}：$reason")
         }
-        return null
     }
 
-    private fun current(v: View): Int = try {
-        XposedHelpers.callMethod(v, "getCurrentStep") as Int
-    } catch (_: Throwable) {
-        0
+    private val cache = java.util.concurrent.ConcurrentHashMap<Class<*>, Members>()
+    private fun members(v: View) = cache.computeIfAbsent(v.javaClass) { Members(it) }
+
+    private fun steps(v: View): List<*>? {
+        val m = members(v)
+        (runCatching { m.list?.get(v) }.getOrNull() as? List<*>)?.let { return it }
+        m.warn("档位列表按字段类型降级查找")
+        return m.alternatives.firstNotNullOfOrNull { field -> runCatching { field.get(v) }.getOrNull() as? List<*> }
+    }
+
+    private fun current(v: View): Int? {
+        val m = members(v)
+        val value = try { m.getter?.invoke(v) as? Int } catch (_: Throwable) { null }
+        if (value == null) m.warn("无法读取当前档位")
+        return value
     }
 
     private fun label(list: List<*>, i: Int): String {
@@ -97,7 +106,7 @@ object StepSlider {
     private fun describe(v: View, info: AccessibilityNodeInfo) {
         val list = steps(v) ?: return
         if (list.isEmpty()) return
-        val i = current(v).coerceIn(0, list.size - 1)
+        val i = current(v)?.coerceIn(list.indices) ?: return
         info.className = "android.widget.SeekBar"
         info.contentDescription = title(v) ?: "滑块"
         val st = state(v, list, i)
@@ -114,7 +123,7 @@ object StepSlider {
     private fun act(v: View, action: Int, args: Bundle?): Boolean {
         val list = steps(v) ?: return false
         if (list.isEmpty()) return false
-        val i = current(v).coerceIn(0, list.size - 1)
+        val i = current(v)?.coerceIn(list.indices) ?: return false
         val target = when (action) {
             AccessibilityNodeInfo.ACTION_SCROLL_FORWARD -> i + 1
             AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD -> i - 1
@@ -123,7 +132,8 @@ object StepSlider {
             else -> return false
         }.coerceIn(0, list.size - 1)
         if (target != i) select(v, list.size, target)
-        val st = state(v, list, current(v).coerceIn(0, list.size - 1))
+        val actual = current(v) ?: return true
+        val st = state(v, list, actual.coerceIn(list.indices))
         L.i("分档滑块「${title(v) ?: ""}」：$st")
         v.announceForAccessibility(if (target == i) "已到头，$st" else st)
         return true
