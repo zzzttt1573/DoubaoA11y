@@ -40,8 +40,8 @@ object Candidates {
     val composing: Boolean get() = origin.isOpen() && current.any { it.isNotBlank() }
     fun hasCandidates(): Boolean = composing
     fun suppressSpeakFor(ms: Long) { suppressSpeakUntil = android.os.SystemClock.uptimeMillis() + ms }
-    fun prev(): Boolean { if (!composing) return false; move(-1); return true }
-    fun next(): Boolean { if (!composing) return false; move(1); return true }
+    fun prev(): Boolean { if (!composing || isEnglishBoard()) return false; move(-1); return true }
+    fun next(): Boolean { if (!composing || isEnglishBoard()) return false; move(1); return true }
     fun commit(): Boolean = composing && (commitSelected() || VirtualKeys.tapKeyNamed("空格"))
     fun markTyping() {
         lastTypingAt = android.os.SystemClock.uptimeMillis()
@@ -57,7 +57,7 @@ object Candidates {
     }
     fun onCursorMove() { origin.cursorMoved(); clearView("光标移动") }
     fun onDelete() { clearSession("删除候选") }
-    private fun isEnglishBoard(): Boolean = JniHooks.isEnglish || KeyboardState.boardName == "英文键盘"
+    fun isEnglishBoard(): Boolean = JniHooks.isEnglish || KeyboardState.boardName == "英文键盘"
     fun onExternalSelection(hasComposingRegion: Boolean) {
         // 刚抬手输入按键时，合成的 ACTION_UP（40ms 后）和引擎快照还在路上；
         // 此时到达的异步 onUpdateSelection 多半来自上一笔删除/上屏，不能误判为移光标而挡掉新按键的候选。
@@ -81,7 +81,7 @@ object Candidates {
         if (engineTyping() == false) clearSession("拼音栏已空")
     }
 
-    private val navOn: Boolean get() = VirtualKeys.enabled && Config.b("candidateNav") && composing
+    private val navOn: Boolean get() = VirtualKeys.enabled && Config.b("candidateNav") && composing && !isEnglishBoard()
 
     private val ENTER_NAMES = setOf(
         "回车", "换行", "发送", "搜索", "完成", "下一项", "前往",
@@ -89,7 +89,7 @@ object Candidates {
     )
 
     /**
-     * 有候选时哪些键用来左移、右移候选：
+     * 有候选时哪些键用来左移、右移候选（英文键盘除外，英文键盘空格两侧保持原生功能）：
      * - 优先按当前键盘键位表定位空格键，将与空格同一底行的左侧所有按键映射为左移，右侧按键映射为右移；
      * - 排除竖排符号栏（inColumn）与横排分类栏（inRow）；
      * - 回车/发送/确定等底行最右下角动作键由 candidateNavEnter 开关决定是否并入右移

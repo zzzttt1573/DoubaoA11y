@@ -146,8 +146,8 @@ object GestureMap {
         // “暂时关闭全屏模式”：不收起键盘，切回半屏，下次展开自动恢复全屏
         if (action == ConfigSpec.ACT_TOGGLE_FULLSCREEN) return FullscreenMode.suspendTemporarily()
         // “上一个/下一个字符或候选词”和天坦的动作名一个意思：有候选就切候选，没候选才移光标。
-        // 选择模式下不能切候选，要留给左右扩选
-        if (!EditActions.isSelecting) {
+        // 选择模式下不能切候选，要留给左右扩选；英文键盘下也不切候选，直接移动光标
+        if (!EditActions.isSelecting && !Candidates.isEnglishBoard()) {
             if (action == ConfigSpec.ACT_PREV_CHAR && Candidates.prev()) return true
             if (action == ConfigSpec.ACT_NEXT_CHAR && Candidates.next()) return true
         }

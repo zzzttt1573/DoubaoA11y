@@ -737,8 +737,9 @@ class GestureLayer(ctx: Context) : View(ctx) {
                 val skipForEditOption = tapSlot && EditOptions.isFresh()
                 if (!skipForEditOption) {
                     val done = when (slot) {
-                        ConfigSpec.G_SINGLE_LEFT -> Candidates.prev()
-                        ConfigSpec.G_SINGLE_RIGHT -> Candidates.next()
+                        // 英文键盘下单指左右滑不用于切换候选，直接放行给常规手势（默认移动光标）
+                        ConfigSpec.G_SINGLE_LEFT -> if (Candidates.isEnglishBoard()) false else Candidates.prev()
+                        ConfigSpec.G_SINGLE_RIGHT -> if (Candidates.isEnglishBoard()) false else Candidates.next()
                         // 上滑清空候选栏
                         ConfigSpec.G_SINGLE_UP -> KeyboardOps.clearCandidate()
                         // 下滑把当前选中的候选上屏（和单击/双击一样）
