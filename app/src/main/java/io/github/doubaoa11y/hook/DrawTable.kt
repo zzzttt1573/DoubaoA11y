@@ -125,7 +125,6 @@ class DrawTable(var windowName: String) {
     var drawsOutsideOnDraw = 0L
     var changed = false
     var lastDumpText: String? = null
-    val lastDirty = Rect()
 
     /** 本帧画过预览气泡，之后的绘制项都属于气泡 */
     var inPopup = false
@@ -133,7 +132,6 @@ class DrawTable(var windowName: String) {
     fun beginFrame(dirty: Rect) {
         frames++
         inPopup = false
-        lastDirty.set(dirty)
         val before = items.size
         items.removeAll { Rect.intersects(it.rect, dirty) || it.rect.isEmpty && dirty.contains(it.rect.left, it.rect.top) }
         if (items.size != before) changed = true
@@ -166,8 +164,16 @@ class DrawTable(var windowName: String) {
             if (it.kind == DrawItem.Kind.TEXT && (it.text.isNullOrBlank())) continue
             val cx = it.cx().toInt()
             val cy = it.cy().toInt()
-            val box = boxes.filter { b -> b.rect.contains(cx, cy) }
-                .minByOrNull { b -> b.rect.width().toLong() * b.rect.height() }
+            var box: DrawItem? = null
+            var smallestArea = Long.MAX_VALUE
+            for (candidate in boxes) {
+                if (!candidate.rect.contains(cx, cy)) continue
+                val area = candidate.rect.width().toLong() * candidate.rect.height()
+                if (area < smallestArea) {
+                    box = candidate
+                    smallestArea = area
+                }
+            }
             if (box == null) orphans.add(it) else labelsOf.getOrPut(box) { ArrayList() }.add(it)
         }
         val keys = ArrayList<Key>()

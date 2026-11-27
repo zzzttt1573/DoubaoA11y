@@ -1,5 +1,7 @@
 package io.github.doubaoa11y.ui
 
+import io.github.doubaoa11y.NativeRestoreFiles
+
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.BroadcastReceiver
@@ -50,7 +52,7 @@ object NativeBackupUi {
             while (true) {
                 val e = zis.nextEntry ?: break
                 if (!e.isDirectory && e.name == "manifest.json") {
-                    manifestText = String(zis.readBytes(), Charsets.UTF_8)
+                    manifestText = String(NativeRestoreFiles.readManifest(zis), Charsets.UTF_8)
                     break
                 }
                 zis.closeEntry()

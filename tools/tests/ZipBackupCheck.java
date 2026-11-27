@@ -1,6 +1,7 @@
 import io.github.doubaoa11y.ui.BackupResourceTransaction;
 import io.github.doubaoa11y.ui.LegacyBackupFormat;
 import io.github.doubaoa11y.ui.ZipBackup;
+import io.github.doubaoa11y.NativeRestoreFiles;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
@@ -48,6 +49,24 @@ public final class ZipBackupCheck {
     public static void main(String[] args) throws Exception {
         fixture = Files.createTempDirectory(Paths.get("."), "zip-backup-fixture-").toAbsolutePath();
         try {
+            NativeRestoreFiles restore = NativeRestoreFiles.INSTANCE;
+            int limit = NativeRestoreFiles.MANIFEST_LIMIT;
+            check(restore.readManifest(new ByteArrayInputStream(new byte[limit])).length == limit);
+            ByteArrayInputStream largeManifest = new ByteArrayInputStream(new byte[limit + 2]);
+            try { restore.readManifest(largeManifest); throw new AssertionError("accepted oversized manifest"); }
+            catch (IllegalArgumentException expected) { check(largeManifest.available() == 1); }
+
+            Path pending = Files.createDirectory(fixture.resolve("pending"));
+            Files.write(pending.resolve("old"), utf("previous"));
+            File staged = fixture.resolve("stage").toFile();
+            try { restore.publish(staged, pending.toFile()); throw new AssertionError("published missing stage"); }
+            catch (IllegalStateException expected) { check(Files.exists(pending.resolve("old"))); }
+            Files.move(pending, fixture.resolve("pending.previous"));
+            check(restore.withPending(pending.toFile(), () -> Files.exists(pending.resolve("old"))));
+            Files.createDirectory(staged.toPath());
+            Files.write(staged.toPath().resolve("new"), utf("verified"));
+            restore.publish(staged, pending.toFile());
+            check(Files.exists(pending.resolve("new")) && !Files.exists(pending.resolve("old")));
             Map<String, byte[]> nativeFiles = files("settings.json", "sounds/key.audio");
             try (ZipBackup.Contents data = ZipBackup.INSTANCE.read(new ByteArrayInputStream(zip(nativeFiles)), fixture.toFile())) {
                 check(!data.getLegacy()); check(data.getSounds().keySet().equals(Collections.singleton("key")));

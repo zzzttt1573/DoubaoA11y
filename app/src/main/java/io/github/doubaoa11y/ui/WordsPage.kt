@@ -22,23 +22,28 @@ import io.github.doubaoa11y.hook.CharWords
  * 改动存在设置页里，和其他设置一起发给豆包进程，豆包优先用自定义的。
  */
 class WordsPage(private val act: SettingsActivity) {
-    private class Row(val c: Char, val builtIn: String?)
+    private class Row(val c: String, val builtIn: String?)
 
-    private val builtIn: Map<Char, String> = try {
-        CharWords.builtIn()
+    private val builtIn: Map<String, String> = try {
+        CharWords.builtIn().entries.associate { it.key.toString() to it.value }
     } catch (_: Throwable) {
         emptyMap()
     }
     private val all: List<Row> = builtIn.map { Row(it.key, it.value) }
-    private var custom: MutableMap<Char, String> = load()
+    private var custom: MutableMap<String, String> = load()
     private var shown: List<Row> = all
     private lateinit var adapter: BaseAdapter
     private lateinit var count: TextView
 
-    private fun load(): MutableMap<Char, String> {
-        val m = LinkedHashMap<Char, String>()
-        for (line in (act.prefs.getString(SettingsActivity.PREF_WORDS, "") ?: "").split('\n')) {
-            if (line.length >= 3 && line[1] == '\t') m[line[0]] = line.substring(2)
+    private fun load(): MutableMap<String, String> {
+        val m = LinkedHashMap<String, String>()
+        for (raw in (act.prefs.getString(SettingsActivity.PREF_WORDS, "") ?: "").split('\n')) {
+            val line = raw.removeSuffix("\r")
+            val tab = line.indexOf('\t')
+            if (tab in 1..2 && tab < line.lastIndex) {
+                val key = line.substring(0, tab)
+                if (CharWords.isSingleHan(key)) m[key] = line.substring(tab + 1)
+            }
         }
         return m
     }
@@ -173,12 +178,25 @@ class WordsPage(private val act: SettingsActivity) {
         shown = when {
             q.isEmpty() -> base
             else -> {
-                val hit = base.filter { r -> r.c.toString() == q || q.contains(r.c) || (word(r)?.contains(q) == true) }
-                    .sortedBy { r -> if (r.c.toString() == q) 0 else if (q.contains(r.c)) 1 else 2 }
+                val hit = base.filter { r -> r.c == q || q.contains(r.c) || (word(r)?.contains(q) == true) }
+                    .sortedBy { r -> if (r.c == q) 0 else if (q.contains(r.c)) 1 else 2 }
                 // 搜的字词表里没有：也给一行，方便添加；这些行不算“找到”
                 val have = base.map { it.c }.toSet()
                 val extra = if (onlyCustom) emptyList()
-                else q.filter { CharWords.isCjk(it) && it !in have }.toSet().map { Row(it, null) }
+                else {
+                    val out = LinkedHashSet<String>()
+                    var i = 0
+                    while (i < q.length) {
+                        val cp = q.codePointAt(i)
+                        val step = Character.charCount(cp)
+                        if (CharWords.isHanCodePoint(cp)) {
+                            val ch = q.substring(i, i + step)
+                            if (ch !in have) out.add(ch)
+                        }
+                        i += step
+                    }
+                    out.map { Row(it, null) }
+                }
                 extraCount = extra.size
                 extra + hit
             }
@@ -203,7 +221,8 @@ class WordsPage(private val act: SettingsActivity) {
         val charInput = EditText(act).apply {
             id = View.generateViewId()
             isSingleLine = true
-            filters = arrayOf(InputFilter.LengthFilter(1))
+            // 扩展 B-I 区生僻字为 UTF-16 代理对（占 2 个 Char）
+            filters = arrayOf(InputFilter.LengthFilter(2))
         }
         charLabel.labelFor = charInput.id
         val tip = TextView(act).apply {
@@ -233,8 +252,9 @@ class WordsPage(private val act: SettingsActivity) {
             .setTitle("添加新字")
             .setView(box)
             .setPositiveButton("确定") { _, _ ->
-                val c = charInput.text.toString()[0]
+                val c = charInput.text.toString().trim()
                 val w = wordInput.text.toString().trim()
+                if (!CharWords.isSingleHan(c) || w.isEmpty()) return@setPositiveButton
                 custom[c] = w
                 save()
                 refresh()
@@ -244,18 +264,17 @@ class WordsPage(private val act: SettingsActivity) {
             .create()
 
         fun check() {
-            val t = charInput.text.toString()
-            val c = t.firstOrNull()
+            val c = charInput.text.toString().trim()
             val msg = when {
-                c == null -> null
-                !CharWords.isCjk(c) -> "请输入一个汉字"
+                c.isEmpty() -> null
+                !CharWords.isSingleHan(c) -> "请输入一个汉字"
                 custom.containsKey(c) -> "“$c”已经自定义过了，现在是“${custom[c]}”。点确定会改成新填的词。"
                 builtIn.containsKey(c) -> "词库里已经有“$c”，自带的是“${builtIn[c]}”。点确定会改用新填的词。"
                 else -> null
             }
             tip.text = msg ?: ""
             tip.visibility = if (msg == null) View.GONE else View.VISIBLE
-            val ok = c != null && CharWords.isCjk(c) && wordInput.text.toString().isNotBlank()
+            val ok = CharWords.isSingleHan(c) && wordInput.text.toString().isNotBlank()
             dlg.getButton(AlertDialog.BUTTON_POSITIVE)?.isEnabled = ok
         }
         val watcher = object : TextWatcher {

@@ -427,13 +427,16 @@ object ApkPatcher {
         val configJsonBytes: ByteArray
     )
 
+    private fun readManifest(zf: ZipFile, entry: ZipEntry): AndroidManifestBlock {
+        val raw = zf.getInputStream(entry).use { it.readBytes() }
+        return AndroidManifestBlock().apply { readBytes(ByteArrayInputStream(raw)) }
+    }
+
     private fun patchManifest(origBaseApk: File, origSigB64: String): ManifestPatchResult {
-        val rawManifest = ZipFile(origBaseApk).use { zf ->
+        val manifest = ZipFile(origBaseApk).use { zf ->
             val e = zf.getEntry("AndroidManifest.xml") ?: error("豆包安装包缺少 AndroidManifest.xml")
-            zf.getInputStream(e).use { it.readBytes() }
+            readManifest(zf, e)
         }
-        val manifest = AndroidManifestBlock()
-        manifest.readBytes(ByteArrayInputStream(rawManifest))
         val app = manifest.applicationElement ?: error("AndroidManifest.xml 缺少 application 节点")
 
         val origFactory = app.searchAttributeByResourceId(RES_ID_APP_COMPONENT_FACTORY)?.valueAsString
@@ -608,9 +611,7 @@ object ApkPatcher {
 
     private fun updateManifestLspatchMeta(zf: ZipFile, newConfigBytes: ByteArray): ByteArray {
         val e = zf.getEntry("AndroidManifest.xml") ?: error("缺少 AndroidManifest.xml")
-        val raw = zf.getInputStream(e).use { it.readBytes() }
-        val manifest = AndroidManifestBlock()
-        manifest.readBytes(ByteArrayInputStream(raw))
+        val manifest = readManifest(zf, e)
         val app = manifest.applicationElement ?: error("AndroidManifest.xml 缺少 application 节点")
         val configBase64 = Base64.encodeToString(newConfigBytes, Base64.NO_WRAP)
         var updated = false
@@ -634,9 +635,7 @@ object ApkPatcher {
 
     private fun ensureManifestQueriesFromZip(zf: ZipFile): ByteArray? {
         val e = zf.getEntry("AndroidManifest.xml") ?: return null
-        val raw = zf.getInputStream(e).use { it.readBytes() }
-        val manifest = AndroidManifestBlock()
-        manifest.readBytes(ByteArrayInputStream(raw))
+        val manifest = readManifest(zf, e)
         if (!ensureReaderQueries(manifest)) return null
         manifest.refresh()
         return manifest.bytes

@@ -27,6 +27,7 @@ object EditActions {
     /** 是否在选择模式（多选）里：进入后方向动作变成扩展选择 */
     @Volatile
     private var selecting = false
+    private var selectionGeneration = 0L
 
     /** 选择模式的起点（绝对偏移），-1 表示还没开始选 */
     private var anchor = -1
@@ -214,14 +215,7 @@ object EditActions {
      */
     fun onExternalDelete() {
         if (!selecting) return
-        main.postDelayed({
-            val ic = ic() ?: return@postDelayed
-            val s = snapshot(ic)
-            // 编辑框里已经没有选中文本了（被删掉或收成光标），退出选择态
-            if (s == null || !s.hasSelection) {
-                clearSelectionState("删除键删掉选中文本")
-            }
-        }, 120)
+        checkSelectionAfterDelete(120, clearWithoutConnection = false, reason = "删除键删掉选中文本")
     }
 
     /**
@@ -237,13 +231,17 @@ object EditActions {
             EditOptions.keyTyped()
             return
         }
+        checkSelectionAfterDelete(150, clearWithoutConnection = true, reason = "键盘删除键删掉选中文本")
+    }
+
+    private fun checkSelectionAfterDelete(delayMs: Long, clearWithoutConnection: Boolean, reason: String) {
+        val generation = selectionGeneration
         main.postDelayed({
-            val ic = ic()
-            val s = ic?.let { snapshot(it) }
-            if (s == null || !s.hasSelection) {
-                clearSelectionState("键盘删除键删掉选中文本")
-            }
-        }, 150)
+            if (generation != selectionGeneration || !selecting) return@postDelayed
+            val connection = ic()
+            if (connection == null && !clearWithoutConnection) return@postDelayed
+            if (connection?.let { snapshot(it) }?.hasSelection != true) clearSelectionState(reason)
+        }, delayMs)
     }
 
     /**
@@ -263,6 +261,7 @@ object EditActions {
      * 和“活动端留着旧偏移、下次进来直接乱扩选”这两种残留。
      */
     private fun clearSelectionState(reason: String) {
+        selectionGeneration++
         cancelPendingExtend()
         selectGuardUntil = 0L
         if (!selecting && anchor < 0 && activeEnd < 0) return
@@ -726,6 +725,7 @@ object EditActions {
         Candidates.onCursorMove()
         val now = SystemClock.uptimeMillis()
         val hadSelection = s.hasSelection
+        selectionGeneration++
         selecting = true
         selectGuardUntil = now + 260L
         // 固定端 = 当前光标位置（绝对偏移）
@@ -747,6 +747,7 @@ object EditActions {
 
     /** 取消选择：退出选择模式，光标回到选择起点 */
     fun deselect() {
+        selectionGeneration++
         Candidates.onCursorMove()
         val a = anchor
         // 先把状态收干净：以前这里 `val ic = ic() ?: return` 会在拿不到输入连接时
@@ -1810,6 +1811,7 @@ object EditActions {
     /** 全选：选中全部文字并进入选择态，之后左右滑可扩选/缩选、剪切复制删除 */
     fun selectAll() {
         val ic = ic() ?: return
+        selectionGeneration++
         val before = snapshot(ic)
         val now = SystemClock.uptimeMillis()
         // 先按“选上了”处理：校验要等一下才能做，用户这期间滑一下也是扩选，不会变成移动光标

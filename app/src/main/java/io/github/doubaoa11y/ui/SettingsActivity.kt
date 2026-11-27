@@ -250,23 +250,25 @@ class SettingsActivity : Activity() {
         val localIntegrated = doubaoStatus.kind == io.github.doubaoa11y.patch.ApkPatcher.PatchKind.LOCAL_INTEGRATED
         val mismatchEmbedded = localIntegrated && !doubaoStatus.embeddedModuleMatchesCurrent
         when {
-            running != ConfigSpec.MODULE_VERSION_CODE || mismatchEmbedded -> {
-                if (localIntegrated) {
-                    showFix("一键同步新版模块到豆包", showPatchEntry = false) {
-                        startActivity(Intent(this, SettingsActivity::class.java).putExtra(EXTRA_PAGE, PATCH_WIZARD))
-                    }
-                } else {
-                    showFix("去强行停止豆包输入法", showPatchEntry = true) { Updater.openDoubaoInfo(this) }
+            localIntegrated && (running != ConfigSpec.MODULE_VERSION_CODE || mismatchEmbedded) -> {
+                // 集成模式：只引导“一键注入新模块”，不出现强行停止弹窗与按钮；不匹配提示置顶
+                showFix("一键注入新模块", showPatchEntry = false) {
+                    startActivity(Intent(this, SettingsActivity::class.java).putExtra(EXTRA_PAGE, PATCH_WIZARD))
                 }
-                if (!staleWarned && !isFinishing && running != ConfigSpec.MODULE_VERSION_CODE) {
+                val msg = "豆包输入法中集成的模块版本与当前安装的不匹配。请点击“一键注入新模块”同步更新。"
+                status?.text = "注意：$msg\n当前版本 ${ConfigSpec.MODULE_VERSION_NAME}"
+                if (!staleWarned && !isFinishing) {
                     staleWarned = true
-                    val msg = if (localIntegrated) {
-                        "豆包输入法里集成的模块与当前安装的不匹配。请点击“一键同步新版模块到豆包”直接覆盖更新。"
-                    } else {
-                        "豆包输入法里运行的还是旧版模块。请在豆包输入法的应用信息里点“强行停止”，再弹出一次键盘。"
-                    }
-                    status?.text = "当前版本 ${ConfigSpec.MODULE_VERSION_NAME}\n状态：$msg"
-                    if (!localIntegrated) Updater.forceStopDialog(this, "需要强行停止豆包输入法", msg)
+                }
+            }
+            !localIntegrated && running != ConfigSpec.MODULE_VERSION_CODE -> {
+                // 本地/Root 模式：只引导“去强行停止豆包输入法”，不混入免 Root 注入入口；不匹配提示置顶
+                showFix("去强行停止豆包输入法", showPatchEntry = false) { Updater.openDoubaoInfo(this) }
+                val msg = "豆包输入法里运行的还是旧版模块。请在豆包输入法的应用信息里点“强行停止”，再弹出一次键盘。"
+                status?.text = "注意：$msg\n当前版本 ${ConfigSpec.MODULE_VERSION_NAME}"
+                if (!staleWarned && !isFinishing) {
+                    staleWarned = true
+                    Updater.forceStopDialog(this, "需要强行停止豆包输入法", msg)
                 }
             }
             !prefs.getBoolean("moduleOn", true) -> hideFix()
@@ -620,12 +622,20 @@ class SettingsActivity : Activity() {
                     val st = status
                     if (st != null) {
                         val doubaoStatus = io.github.doubaoa11y.patch.ApkPatcher.inspect(this@SettingsActivity)
-                        val integratedLine = if (
+                        val integratedMismatch =
                             doubaoStatus.kind == io.github.doubaoa11y.patch.ApkPatcher.PatchKind.LOCAL_INTEGRATED &&
-                            !doubaoStatus.embeddedModuleMatchesCurrent
-                        ) "\n集成模块：与当前安装的不匹配，请同步更新" else ""
-                        val fullMsg = "$msg$integratedLine"
-                        st.text = "当前版本 ${ConfigSpec.MODULE_VERSION_NAME}\n状态：$fullMsg"
+                                !doubaoStatus.embeddedModuleMatchesCurrent
+                        val runningVer = if (ok) (getResultExtras(false)?.getInt("moduleVersion", -1) ?: -1) else -1
+                        val localMismatch = ok &&
+                            doubaoStatus.kind != io.github.doubaoa11y.patch.ApkPatcher.PatchKind.LOCAL_INTEGRATED &&
+                            runningVer != ConfigSpec.MODULE_VERSION_CODE
+                        val mismatchLead = when {
+                            integratedMismatch -> "注意：集成模块与当前安装的不匹配，请点击“一键注入新模块”同步更新。\n"
+                            localMismatch -> "注意：豆包输入法里运行的还是旧版模块，请先强行停止豆包输入法。\n"
+                            else -> ""
+                        }
+                        val fullMsg = "$mismatchLead$msg"
+                        st.text = "${mismatchLead}当前版本 ${ConfigSpec.MODULE_VERSION_NAME}\n状态：$msg"
                         st.announceForAccessibility(fullMsg)
                         if (ok) checkResult(getResultExtras(false), doubaoStatus)
                         else {
@@ -636,14 +646,12 @@ class SettingsActivity : Activity() {
                                 showFix("注入无障碍模块", showPatchEntry = false) {
                                     startActivity(Intent(this@SettingsActivity, SettingsActivity::class.java).putExtra(EXTRA_PAGE, PATCH_WIZARD))
                                 }
-                            } else if (kind == io.github.doubaoa11y.patch.ApkPatcher.PatchKind.LOCAL_INTEGRATED &&
-                                !doubaoStatus.embeddedModuleMatchesCurrent
-                            ) {
-                                showFix("一键同步新版模块到豆包", showPatchEntry = false) {
+                            } else if (integratedMismatch) {
+                                showFix("一键注入新模块", showPatchEntry = false) {
                                     startActivity(Intent(this@SettingsActivity, SettingsActivity::class.java).putExtra(EXTRA_PAGE, PATCH_WIZARD))
                                 }
                             } else {
-                                showFix("去强行停止豆包输入法", showPatchEntry = true) { Updater.openDoubaoInfo(this@SettingsActivity) }
+                                showFix("去强行停止豆包输入法", showPatchEntry = false) { Updater.openDoubaoInfo(this@SettingsActivity) }
                             }
                         }
                     } else if (ok && cmd != null) {

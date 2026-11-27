@@ -20,9 +20,41 @@ object CharWords {
     fun builtIn(): Map<Char, String> = map
 
     /** 先看用户自定义的，再看自带的 */
-    private fun wordOf(c: Char): String? = Config.customWords[c] ?: map[c]
+    private fun wordOf(ch: String): String? =
+        Config.customWords[ch] ?: if (ch.length == 1) map[ch[0]] else null
 
-    fun isCjk(c: Char) = c in '一'..'鿿'
+    fun isHanCodePoint(cp: Int): Boolean =
+        cp == 0x3007 ||
+            cp in 0x3400..0x4DBF ||
+            cp in 0x4E00..0x9FFF ||
+            cp in 0xF900..0xFAFF ||
+            cp in 0x20000..0x2A6DF ||
+            cp in 0x2A700..0x2EBEF ||
+            cp in 0x2F800..0x2FA1F ||
+            cp in 0x30000..0x323AF
+
+    fun isSingleHan(s: String): Boolean {
+        if (s.isEmpty()) return false
+        val cp = s.codePointAt(0)
+        return Character.charCount(cp) == s.length && isHanCodePoint(cp)
+    }
+
+    fun isCjk(c: Char): Boolean = isHanCodePoint(c.code)
+
+    /** 将文本拆成完整 Unicode 码点单字列表 */
+    fun splitHanChars(text: String): List<String>? {
+        if (text.isEmpty()) return null
+        val out = ArrayList<String>(text.length)
+        var i = 0
+        while (i < text.length) {
+            val cp = text.codePointAt(i)
+            if (!isHanCodePoint(cp)) return null
+            val step = Character.charCount(cp)
+            out.add(text.substring(i, i + step))
+            i += step
+        }
+        return out
+    }
 
     /**
      * 候选加逐字解释：候选字数不超过设置值（0 表示不限）时，每个字都解释。
@@ -30,11 +62,12 @@ object CharWords {
      */
     fun explainWord(text: String): String {
         val t = text.trim()
-        if (t.isEmpty() || !Config.b("charExplain") || !t.all { isCjk(it) }) return t
+        if (t.isEmpty() || !Config.b("charExplain")) return t
+        val chars = splitHanChars(t) ?: return t
         val max = Config.i("explainMaxLen")
-        if (max > 0 && t.length > max) return t
-        if (t.length == 1) return explain(t)
-        val parts = t.map { c -> wordOf(c)?.let { "${it}的$c" } ?: c.toString() }
+        if (max > 0 && chars.size > max) return t
+        if (chars.size == 1) return explain(t)
+        val parts = chars.map { ch -> wordOf(ch)?.let { "${it}的$ch" } ?: ch }
         return t + "，" + parts.joinToString("，")
     }
 
@@ -51,22 +84,24 @@ object CharWords {
     /** 单个汉字加解释（直接读成“某某的某”），其它原样 */
     fun explain(text: String): String {
         val t = text.trim()
-        if (t.length != 1 || !isCjk(t[0]) || !Config.b("charExplain")) return t
-        val w = wordOf(t[0]) ?: return t
+        if (!isSingleHan(t) || !Config.b("charExplain")) return t
+        val w = wordOf(t) ?: return t
         return "${w}的$t"
     }
 
     /** 单个汉字带字头解释：“好” → “好，好坏的好”；无解释或未开单字解释时返回 null */
     fun explainWithChar(c: Char, force: Boolean = false): String? {
         if (!isCjk(c) || (!force && !Config.b("charExplain"))) return null
-        val w = wordOf(c) ?: return null
-        return "$c，${w}的$c"
+        val s = c.toString()
+        val w = wordOf(s) ?: return null
+        return "$s，${w}的$s"
     }
 
     /** 仅返回单个汉字的解释部分：“好” → “好坏的好”；无解释或未开单字解释时返回 null */
     fun explainOnly(c: Char, force: Boolean = false): String? {
         if (!isCjk(c) || (!force && !Config.b("charExplain"))) return null
-        val w = wordOf(c) ?: return null
-        return "${w}的$c"
+        val s = c.toString()
+        val w = wordOf(s) ?: return null
+        return "${w}的$s"
     }
 }

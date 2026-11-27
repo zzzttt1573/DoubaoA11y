@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import io.github.doubaoa11y.ConfigSpec
+import io.github.doubaoa11y.NativeRestoreFiles
 import io.github.doubaoa11y.SettingsProvider
 import org.json.JSONArray
 import org.json.JSONObject
@@ -14,7 +15,6 @@ import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.io.RandomAccessFile
 import java.security.MessageDigest
 import java.util.Locale
 import java.util.zip.ZipEntry
@@ -37,7 +37,6 @@ object NativeBackup {
     private const val PAYLOAD_DIR = "payload"
     private const val READY_FILE = "restore.ready"
     private const val ROLLBACK_DIR = "doubaoa11y_restore_rollback"
-    private const val LOCK_FILE = "doubaoa11y_restore.lock"
     private const val STATUS_FILE = "doubaoa11y_restore_status.json"
 
     private const val MAX_FILES = 512
@@ -122,24 +121,15 @@ object NativeBackup {
         val filesDir = File(dataDir, "files")
         val pendingDir = File(filesDir, PENDING_DIR)
         val readyFile = File(pendingDir, READY_FILE)
-        if (!readyFile.isFile) {
-            earlyChecked = true
-            return
-        }
         filesDir.mkdirs()
-        val lockFile = File(filesDir, LOCK_FILE)
         try {
-            RandomAccessFile(lockFile, "rw").use { raf ->
-                raf.channel.lock().use {
-                    if (!readyFile.isFile) {
-                        earlyChecked = true
-                        return
-                    }
+            NativeRestoreFiles.withPending(pendingDir) {
+                if (!earlyChecked && readyFile.isFile) {
                     Log.i(TAG, "检测到挂起的豆包原生设置恢复包，开始冷启动原子恢复")
                     val status = executeStagedRestore(dataDir, pendingDir, filesDir)
                     writeStatus(filesDir, status)
-                    earlyChecked = true
                 }
+                earlyChecked = true
             }
         } catch (t: Throwable) {
             Log.e(TAG, "冷启动恢复原生设置异常", t)
@@ -349,21 +339,19 @@ object NativeBackup {
         val dataDir = resolveDataDir(ctx) ?: error("无法定位豆包数据目录")
         val filesDir = File(dataDir, "files")
         val pendingDir = File(filesDir, PENDING_DIR)
-        val payloadDir = File(pendingDir, PAYLOAD_DIR)
-        val readyFile = File(pendingDir, READY_FILE)
-
-        val pfd = openXferFd(ctx, xferUri, token, write = false)
-            ?: error("无法打开模块中转读取通道")
-
-        // 先清理旧暂存区
-        pendingDir.deleteRecursively()
-        payloadDir.mkdirs()
+        filesDir.mkdirs()
+        val staged = File(filesDir, "doubaoa11y_stage_" + java.util.UUID.randomUUID())
+        check(staged.mkdir()) { "无法创建暂存目录" }
+        val payloadDir = File(staged, PAYLOAD_DIR)
 
         try {
+            check(payloadDir.mkdir()) { "无法创建恢复数据目录" }
             var manifestBytes: ByteArray? = null
-            var fileCount = 0
+            val payloadNames = HashSet<String>()
             var totalBytes = 0L
 
+            val pfd = openXferFd(ctx, xferUri, token, write = false)
+                ?: error("无法打开模块中转读取通道")
             pfd.use { fd ->
                 ZipInputStream(BufferedInputStream(FileInputStream(fd.fileDescriptor), 64 * 1024)).use { zis ->
                     val buf = ByteArray(64 * 1024)
@@ -375,14 +363,14 @@ object NativeBackup {
                         }
                         val name = entry.name
                         if (name == MANIFEST_NAME) {
-                            manifestBytes = zis.readBytes()
-                            require((manifestBytes?.size ?: 0) <= 2 * 1024 * 1024) { "manifest.json 过大" }
+                            require(manifestBytes == null) { "重复的 manifest.json" }
+                            manifestBytes = NativeRestoreFiles.readManifest(zis)
                             zis.closeEntry()
                             continue
                         }
                         require(isAllowedRestorePath(name)) { "备份包包含不允许恢复的路径：$name" }
-                        fileCount++
-                        require(fileCount <= MAX_FILES) { "备份包文件数量超过上限（$MAX_FILES）" }
+                        require(payloadNames.add(name)) { "备份包包含重复路径：$name" }
+                        require(payloadNames.size <= MAX_FILES) { "备份包文件数量超过上限（$MAX_FILES）" }
 
                         val outFile = File(payloadDir, name)
                         outFile.parentFile?.mkdirs()
@@ -416,19 +404,21 @@ object NativeBackup {
                 val expectedSha = obj.getString("sha256")
                 val expectedSize = obj.getLong("size")
                 require(isAllowedRestorePath(rel)) { "清单包含非法路径：$rel" }
+                require(payloadNames.remove(rel)) { "清单路径重复或缺少对应文件：$rel" }
                 val f = File(payloadDir, rel)
                 require(f.isFile) { "缺少备份文件：$rel" }
                 require(f.length() == expectedSize) { "文件大小校验失败：$rel" }
                 require(sha256Hex(f) == expectedSha) { "文件完整性校验失败：$rel" }
             }
 
-            File(pendingDir, MANIFEST_NAME).writeBytes(rawManifest)
-            readyFile.writeText(System.currentTimeMillis().toString(), Charsets.UTF_8)
+            require(payloadNames.isEmpty()) { "备份包包含清单以外的文件" }
+            File(staged, MANIFEST_NAME).writeBytes(rawManifest)
+            File(staged, READY_FILE).writeText(System.currentTimeMillis().toString(), Charsets.UTF_8)
+            NativeRestoreFiles.publish(staged, pendingDir)
 
             return "已校验并暂存 ${entries.length()} 个豆包原生设置文件。请强行停止豆包输入法后重新弹出键盘，即可生效。"
-        } catch (t: Throwable) {
-            pendingDir.deleteRecursively()
-            throw t
+        } finally {
+            staged.deleteRecursively()
         }
     }
 
@@ -439,7 +429,13 @@ object NativeBackup {
         val dataDir = resolveDataDir(ctx) ?: return "无法定位豆包数据目录"
         val filesDir = File(dataDir, "files")
         val pendingReady = File(File(filesDir, PENDING_DIR), READY_FILE)
-        if (pendingReady.isFile) {
+        val hasPending = try {
+            filesDir.isDirectory && NativeRestoreFiles.withPending(pendingReady.parentFile!!) { pendingReady.isFile }
+        } catch (t: Throwable) {
+            Log.e(TAG, "读取暂存恢复状态失败", t)
+            return "无法读取暂存恢复状态。"
+        }
+        if (hasPending) {
             return "有待应用的豆包原生恢复包，请先强行停止豆包输入法并重新弹出键盘。"
         }
         val statusFile = File(filesDir, STATUS_FILE)

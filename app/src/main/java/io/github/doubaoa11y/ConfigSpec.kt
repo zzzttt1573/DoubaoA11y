@@ -14,7 +14,12 @@ object ConfigSpec {
 
     const val TARGET_PACKAGE = "com.bytedance.android.doubaoime"
     /** 已适配的豆包版本：版本号 -> 版本名 */
-    val SUPPORTED_VERSIONS = mapOf(100504010L to "1.5.4", 100505010L to "1.5.5", 100506012L to "1.5.6")
+    val SUPPORTED_VERSIONS = mapOf(
+        100504010L to "1.5.4",
+        100505010L to "1.5.5",
+        100506012L to "1.5.6",
+        100507010L to "1.5.7",
+    )
     val SUPPORTED_NAMES: String get() = SUPPORTED_VERSIONS.values.joinToString("、")
 
     /**

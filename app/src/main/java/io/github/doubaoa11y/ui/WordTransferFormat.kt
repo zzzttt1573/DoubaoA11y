@@ -11,7 +11,23 @@ object WordTransferFormat {
     const val MAX_CHARS = 200000
     private const val BOM = "\uFEFF"
 
-    fun read(input: InputStream): Map<Char, String> {
+    fun isHanCodePoint(cp: Int): Boolean =
+        cp == 0x3007 ||
+            cp in 0x3400..0x4DBF ||
+            cp in 0x4E00..0x9FFF ||
+            cp in 0xF900..0xFAFF ||
+            cp in 0x20000..0x2A6DF ||
+            cp in 0x2A700..0x2EBEF ||
+            cp in 0x2F800..0x2FA1F ||
+            cp in 0x30000..0x323AF
+
+    fun isSingleHan(key: String): Boolean {
+        if (key.isEmpty()) return false
+        val cp = key.codePointAt(0)
+        return Character.charCount(cp) == key.length && isHanCodePoint(cp)
+    }
+
+    fun read(input: InputStream): Map<String, String> {
         val out = ByteArrayOutputStream()
         val buffer = ByteArray(8192)
         while (true) {
@@ -23,27 +39,30 @@ object WordTransferFormat {
         return parse(out.toByteArray())
     }
 
-    fun parse(bytes: ByteArray): Map<Char, String> {
+    fun parse(bytes: ByteArray): Map<String, String> {
         require(bytes.size <= MAX_BYTES) { "解释词文件超过 1 MB" }
         val text = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
             .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString().removePrefix(BOM)
         require(text.length <= MAX_CHARS) { "解释词内容超过 200000 字符" }
-        val result = LinkedHashMap<Char, String>()
+        val result = LinkedHashMap<String, String>()
         if (text.isEmpty()) return result
         val lines = text.split('\n')
         for ((i, raw) in lines.withIndex()) {
-            if (i == lines.lastIndex && raw.isEmpty()) continue
             val line = raw.removeSuffix("\r")
-            require(line.length >= 3 && line[1] == '\t') { "第 ${i + 1} 行应为单字、制表符、解释词" }
-            validate(line[0], line.substring(2), i + 1)
-            require(!result.containsKey(line[0])) { "第 ${i + 1} 行的字重复" }
-            result[line[0]] = line.substring(2)
+            if (line.isEmpty()) continue
+            val tab = line.indexOf('\t')
+            require(tab in 1..2 && tab < line.lastIndex) { "第 ${i + 1} 行应为单个汉字、制表符、解释词" }
+            val key = line.substring(0, tab)
+            val value = line.substring(tab + 1)
+            validate(key, value, i + 1)
+            require(!result.containsKey(key)) { "第 ${i + 1} 行的字重复" }
+            result[key] = value
         }
         return result
     }
 
     /** 偏好继续使用原来的无 BOM、LF 分隔格式；导出文件单独添加 UTF-8 BOM。 */
-    fun serialize(words: Map<Char, String>): String {
+    fun serialize(words: Map<String, String>): String {
         for ((c, value) in words) validate(c, value, null)
         val text = words.entries.joinToString("\n") { "${it.key}\t${it.value}" }
         require(text.length <= MAX_CHARS) { "解释词内容超过 200000 字符" }
@@ -51,21 +70,21 @@ object WordTransferFormat {
         return text
     }
 
-    fun encode(words: Map<Char, String>): ByteArray = (BOM + serialize(words)).toByteArray(Charsets.UTF_8)
+    fun encode(words: Map<String, String>): ByteArray = (BOM + serialize(words)).toByteArray(Charsets.UTF_8)
 
     data class Change(val text: String, val total: Int, val overwritten: Int, val removed: Int)
 
-    fun plan(current: Map<Char, String>, imported: Map<Char, String>, replace: Boolean): Change {
-        val out = LinkedHashMap<Char, String>()
+    fun plan(current: Map<String, String>, imported: Map<String, String>, replace: Boolean): Change {
+        val out = LinkedHashMap<String, String>()
         if (!replace) out.putAll(current)
         out.putAll(imported)
         return Change(serialize(out), out.size, imported.keys.count { it in current },
             if (replace) current.keys.count { it !in imported } else 0)
     }
 
-    private fun validate(c: Char, value: String, line: Int?) {
+    private fun validate(key: String, value: String, line: Int?) {
         val prefix = if (line == null) "解释词条目" else "第 $line 行"
-        require(c in '一'..'鿿') { "$prefix 必须使用一个汉字（与原词库范围一致）" }
+        require(isSingleHan(key)) { "$prefix 必须使用一个汉字（支持生僻字与扩展区汉字）" }
         require(value.length in 1..256 && value.isNotBlank()) { "$prefix 的解释词须为 1 到 256 个字符且非空白" }
         var i = 0
         while (i < value.length) {

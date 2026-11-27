@@ -83,7 +83,11 @@ object VirtualKeys {
 
     private fun refreshKeys(v: View): List<Key> {
         val s = state(v)
-        val t = KeyboardViewHooks.tableOf(v) ?: return s.keys.also { s.keys = emptyList() }
+        val t = KeyboardViewHooks.tableOf(v)
+        if (t == null) {
+            s.keys = emptyList()
+            return s.keys
+        }
         val ks = t.keys().filter { it.rect.width() > 0 && it.rect.height() > 0 && it.speakable().isNotBlank() }
         s.keys = ks
         return ks
@@ -1245,7 +1249,7 @@ object VirtualKeys {
             y = vl[1] + k.rect.exactCenterY()
         }
         L.i("${if (action == MotionEvent.ACTION_UP) "松开" else "取消"}「${k.speakable()}」，按住 ${SystemClock.uptimeMillis() - holdDownTime} 毫秒${if (holdIsVoice) "，区域=$voiceZone" else ""}")
-        val cancelVoice = holdIsVoice && action == MotionEvent.ACTION_UP && voiceZone == "松手撤回输入"
+        val cancelVoice = holdIsVoice && action == MotionEvent.ACTION_UP && isVoiceCancelZone(voiceZone)
         // 按住删除连续删完松手：多选里这一串删除已经把选中的文本删掉了，退出选择态
         if (!holdIsVoice && k.mainName() == "删除" && action == MotionEvent.ACTION_UP) {
             EditActions.onKeyDelete()
@@ -1268,7 +1272,15 @@ object VirtualKeys {
         return asr.visibility == View.VISIBLE && asr.isShown
     }
 
-    /** 语音长按界面：手指滑进左右两个区域时朗读 */
+    private fun isVoiceCancelZone(zone: String): Boolean =
+        zone.contains("撤回") || zone.contains("取消")
+
+    /**
+     * 语音长按界面：手指滑进左右两个区域时朗读。
+     * - 状态判定：豆包 1.5.4~1.5.6 用 r/s，1.5.7+ 字段顺延为 s/t（自动检测 t 是否为 boolean 字段）。
+     * - 朗读文案：动态读取豆包界面真实文字（中间读 asr_long_press_text，左右优先读 asr_action_btn 内部文案，
+     *   读不到时再根据中间文字是否含“发送”区分普通模式与 1.5.7“说完即发”模式）。
+     */
     private fun checkVoiceZone(kb: View) {
         val asr = try {
             de.robv.android.xposed.XposedHelpers.getObjectField(kb, "mAsrLongPressView") as? View
@@ -1276,21 +1288,90 @@ object VirtualKeys {
             null
         } ?: return
         if (asr.visibility != View.VISIBLE) return
-        val id = asr.resources.getIdentifier("asr_action_btn", "id", asr.context.packageName)
+        val pkg = asr.context.packageName
+        val id = asr.resources.getIdentifier("asr_action_btn", "id", pkg)
         val btn = if (id != 0) asr.findViewById<View>(id) else null
-        val left = btn?.let { boolField(it, "r") } ?: false
-        val right = btn?.let { boolField(it, "s") } ?: false
+        val (left, right) = if (btn != null) {
+            val tVal = boolField(btn, "t")
+            val sVal = boolField(btn, "s")
+            val rVal = boolField(btn, "r")
+            if (tVal != null && sVal != null) {
+                // 1.5.7+：s = 左（撤回），t = 右（发送 / 仅上屏）
+                sVal to tVal
+            } else {
+                // 1.5.4~1.5.6：r = 左（撤回），s = 右（发送）
+                (rVal ?: false) to (sVal ?: false)
+            }
+        } else {
+            false to false
+        }
+        val textId = asr.resources.getIdentifier("asr_long_press_text", "id", pkg)
+        val centerText = if (textId != 0) {
+            (asr.findViewById<View>(textId) as? android.widget.TextView)?.text?.toString()?.trim().orEmpty()
+        } else ""
+        val btnTexts = btn?.let { readVoiceBtnTexts(it) }
+        val leftLabel = btnTexts?.first?.takeIf { it.isNotEmpty() } ?: "松手撤回输入"
+        val rightLabel = btnTexts?.second?.takeIf { it.isNotEmpty() } ?: if (centerText.contains("发送")) {
+            "松手仅上屏"
+        } else {
+            "松手一键发送"
+        }
+        val centerLabel = centerText.ifEmpty { "松手结束" }
         val zone = when {
-            left -> "松手撤回输入"
-            right -> "松手一键发送"
-            else -> "松手结束"
+            left -> leftLabel
+            right -> rightLabel
+            else -> centerLabel
         }
         if (zone != voiceZone) {
             val first = voiceZone.isEmpty()
             voiceZone = zone
             if (!first && Config.b("voiceZoneHint")) Speaker.speak(zone)
-            L.i("语音区域：$zone")
+            val dbg = btn?.let { dumpBoolFields(it) }.orEmpty()
+            val txtDbg = btn?.let { dumpStringFields(it) }.orEmpty()
+            L.i("语音区域：$zone（中=$centerText${if (dbg.isNotEmpty()) "，$dbg" else ""}${if (txtDbg.isNotEmpty()) "，$txtDbg" else ""}）")
         }
+    }
+
+    /** 从 asr_action_btn 内部读取左右按钮的实时中文文案（左=撤回/取消，右=发送/上屏/转文字） */
+    private fun readVoiceBtnTexts(btn: Any): Pair<String, String>? = try {
+        val texts = btn.javaClass.declaredFields
+            .filter { it.type == String::class.java }
+            .mapNotNull { f ->
+                f.isAccessible = true
+                (f.get(btn) as? String)?.trim()?.takeIf { it.length in 2..16 && it.any { ch -> ch in '\u4e00'..'\u9fff' } }
+            }
+            .distinct()
+        if (texts.isEmpty()) null else {
+            val cancelText = texts.firstOrNull { isVoiceCancelZone(it) }.orEmpty()
+            val rightText = texts.firstOrNull { it != cancelText && (it.contains("发送") || it.contains("上屏") || it.contains("文字") || it.contains("输入")) }.orEmpty()
+            if (cancelText.isEmpty() && rightText.isEmpty()) null else cancelText to rightText
+        }
+    } catch (_: Throwable) {
+        null
+    }
+
+    private fun dumpStringFields(o: Any): String = try {
+        o.javaClass.declaredFields
+            .filter { it.type == String::class.java }
+            .mapNotNull { f ->
+                f.isAccessible = true
+                val v = (f.get(o) as? String)?.trim()
+                if (v.isNullOrEmpty()) null else "${f.name}=$v"
+            }
+            .joinToString(",")
+    } catch (_: Throwable) {
+        ""
+    }
+
+    private fun dumpBoolFields(o: Any): String = try {
+        o.javaClass.declaredFields
+            .filter { it.type == Boolean::class.javaPrimitiveType }
+            .joinToString(",") { f ->
+                f.isAccessible = true
+                "${f.name}=${f.getBoolean(o)}"
+            }
+    } catch (_: Throwable) {
+        ""
     }
 
     private fun boolField(o: Any, name: String): Boolean? = try {
@@ -1456,8 +1537,8 @@ object VirtualKeys {
                 if (ev.actionMasked == MotionEvent.ACTION_MOVE) checkVoiceZone(kb)
                 if (ev.actionMasked == MotionEvent.ACTION_UP) {
                     checkVoiceZone(kb)
-                    if (voiceZone == "松手撤回输入") {
-                        L.i("原生空格：松手撤回输入")
+                    if (isVoiceCancelZone(voiceZone)) {
+                        L.i("原生空格：$voiceZone")
                         Voice.discard()
                     }
                 }
