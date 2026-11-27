@@ -279,7 +279,7 @@ object NativeSettingsA11y {
                 super.onInitializeAccessibilityNodeInfo(host, info)
                 try {
                     // 状态每次现读，和图片保持一致
-                    val checked = checkState(cb)
+                    val checked = checkState(cb) ?: return
                     if (!label.isNullOrEmpty()) info.contentDescription = label
                     info.className = if (radio) "android.widget.RadioButton" else "android.widget.CheckBox"
                     info.isCheckable = true
@@ -329,21 +329,38 @@ object NativeSettingsA11y {
         return countCheckBoxes(root) >= 2
     }
 
-    private fun countCheckBoxes(root: View): Int {
+    private fun countCheckBoxes(root: View, limit: Int = 2): Int {
         var n = if (checkboxCls?.isInstance(root) == true) 1 else 0
-        if (root is ViewGroup) for (i in 0 until root.childCount) n += countCheckBoxes(root.getChildAt(i))
+        if (root is ViewGroup) for (i in 0 until root.childCount) {
+            if (n >= limit) break
+            n += countCheckBoxes(root.getChildAt(i), limit - n)
+        }
         return n
     }
 
     /** ImeCheckBox 的选中状态存在布尔字段 a 里；字段名变了就找它唯一的布尔字段 */
-    private fun checkState(cb: View): Boolean = try {
-        XposedHelpers.getBooleanField(cb, "a")
-    } catch (_: Throwable) {
-        try {
-            val fs = cb.javaClass.declaredFields.filter { it.type == Boolean::class.javaPrimitiveType }
-            if (fs.size == 1) fs[0].run { isAccessible = true; getBoolean(cb) } else false
-        } catch (_: Throwable) {
-            false
+    private val stateFields = HashMap<Class<*>, java.lang.reflect.Field?>()
+    private val warnedStates = HashSet<Class<*>>()
+
+    @Synchronized
+    private fun checkState(cb: View): Boolean? {
+        val cls = cb.javaClass
+        return try {
+            if (!stateFields.containsKey(cls)) {
+                stateFields[cls] = null
+                val named = XposedHelpers.findFieldIfExists(cls, "a")
+                val field = named?.takeIf { it.type == Boolean::class.javaPrimitiveType }
+                    ?: cls.declaredFields.singleOrNull {
+                        it.type == Boolean::class.javaPrimitiveType && !java.lang.reflect.Modifier.isStatic(it.modifiers)
+                    }
+                field?.isAccessible = true
+                stateFields[cls] = field
+                if (named !== field || field == null) L.w("复选框状态字段降级 ${cls.name}：${field?.name ?: "未知"}")
+            }
+            stateFields[cls]?.getBoolean(cb)
+        } catch (t: Throwable) {
+            if (warnedStates.add(cls)) L.hookError("NativeSettingsA11y.checkState ${cls.name}", t)
+            null
         }
     }
 

@@ -247,8 +247,8 @@ object KeyboardViewHooks {
         if (!A11yState.recording) return
         val t = table(v)
         if (Config.b("logOtherDraw")) L.v("onDraw 结束 窗口=${t.windowName} 绘制项=${t.items.size}")
-        if (t.changed) VirtualKeys.onTableChanged(v as View)
-        if (t.changed && Config.b("dumpAfterDraw")) {
+        t.scheduleAccessibilityIfChanged { VirtualKeys.onTableChanged(v as View) }
+        if (t.dumpRevision != t.revision && Config.b("dumpAfterDraw")) {
             // 等绘制停下来 300 毫秒再输出，避免动画期间刷屏
             main.removeCallbacks(dumpRunnable)
             main.postDelayed(dumpRunnable, 300)
@@ -266,14 +266,24 @@ object KeyboardViewHooks {
 
     private fun recordText(v: Any, args: Array<Any?>, src: String) {
         if (!A11yState.recording) return
-        val text = args.firstOrNull { it is String } as? String ?: return
-        val tf = args.firstOrNull { it is Typeface } as? Typeface
-        val rect = args.lastOrNull { it is Rect } as? Rect ?: return
-        val ints = args.filterIsInstance<Int>()
-        val size = ints.getOrNull(0) ?: 0
-        val flags = ints.getOrNull(1) ?: 0
-        // 公开的 drawText 有颜色参数（第 3 个 int）；渐变文字和私有方法没有
-        val color = if (src == "drawText" && ints.size >= 3) ints[2] else 0
+        var text: String? = null
+        var tf: Typeface? = null
+        var rect: Rect? = null
+        var size = 0
+        var flags = 0
+        var color = 0
+        var ints = 0
+        for (arg in args) when (arg) {
+            is String -> if (text == null) text = arg
+            is Typeface -> if (tf == null) tf = arg
+            is Rect -> rect = arg
+            is Int -> when (ints++) {
+                0 -> size = arg
+                1 -> flags = arg
+                2 -> if (src == "drawText") color = arg
+            }
+        }
+        if (text == null || rect == null) return
         val font = if (tf == null) "默认" else (typefaceNames[tf] ?: "未知字体@${Integer.toHexString(System.identityHashCode(tf))}")
         val t = table(v)
         noteOutside(t, src)
@@ -284,13 +294,24 @@ object KeyboardViewHooks {
 
     private fun recordRect(v: Any, args: Array<Any?>) {
         if (!A11yState.recording) return
-        val ints = args.filterIsInstance<Int>()
-        if (ints.size < 5) return
-        val r = Rect(ints[0], ints[1], ints[2], ints[3])
-        val radius = args.firstOrNull { it is Float } as? Float ?: 0f
+        val r = Rect()
+        var ints = 0
+        var color = 0
+        var radius: Float? = null
+        for (arg in args) when (arg) {
+            is Float -> if (radius == null) radius = arg
+            is Int -> when (ints++) {
+                0 -> r.left = arg
+                1 -> r.top = arg
+                2 -> r.right = arg
+                3 -> r.bottom = arg
+                4 -> color = arg
+            }
+        }
+        if (ints < 5) return
         val t = table(v)
         noteOutside(t, "fillRect")
-        val item = DrawItem(DrawItem.Kind.RECT, r, color = ints[4], radius = radius)
+        val item = DrawItem(DrawItem.Kind.RECT, r, color = color, radius = radius ?: 0f)
         t.add(item)
         if (Config.b("logRect")) L.v("fillRect 窗口=${t.windowName} ${item.describe()} 参数=${Fmt.args(args)}")
     }
@@ -345,8 +366,8 @@ object KeyboardViewHooks {
     private fun dumpChanged() {
         val list = synchronized(tables) { tables.entries.map { it.key to it.value } }
         for ((v, t) in list) {
-            if (!t.changed) continue
-            t.changed = false
+            if (t.dumpRevision == t.revision) continue
+            t.dumpRevision = t.revision
             dumpOne(v, t, "重绘后", skipIfSame = true)
         }
     }

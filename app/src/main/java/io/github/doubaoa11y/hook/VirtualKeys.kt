@@ -94,10 +94,10 @@ object VirtualKeys {
     }
 
     /** 绘制后调用：按键变了就通知读屏刷新 */
-    fun onTableChanged(v: View) {
-        if (!enabled) return
+    fun onTableChanged(v: View): Boolean {
+        if (!enabled) return false
         main.removeCallbacksAndMessages(v)
-        main.postAtTime({
+        return main.postAtTime({
             try {
                 val s = state(v)
                 val old = s.signature
@@ -124,15 +124,16 @@ object VirtualKeys {
         return providers.getOrPut(v) { Provider(v) }
     }
 
-    private class Provider(val host: View) : AccessibilityNodeProvider() {
+    private class Provider(host: View) : AccessibilityNodeProvider() {
+        private val hostRef = java.lang.ref.WeakReference(host)
         override fun createAccessibilityNodeInfo(virtualViewId: Int): AccessibilityNodeInfo? = try {
-            if (virtualViewId == HOST) hostNode() else keyNode(virtualViewId)
+            hostRef.get()?.let { if (virtualViewId == HOST) hostNode(it) else keyNode(it, virtualViewId) }
         } catch (t: Throwable) {
             L.hookError("VirtualKeys.createNode", t)
             null
         }
 
-        private fun hostNode(): AccessibilityNodeInfo {
+        private fun hostNode(host: View): AccessibilityNodeInfo {
             val info = AccessibilityNodeInfo.obtain(host)
             host.onInitializeAccessibilityNodeInfo(info)
             val ks = refreshKeys(host)
@@ -154,7 +155,7 @@ object VirtualKeys {
             return info
         }
 
-        private fun keyNode(id: Int): AccessibilityNodeInfo? {
+        private fun keyNode(host: View, id: Int): AccessibilityNodeInfo? {
             val s = state(host)
             val k = s.keys.getOrNull(id) ?: return null
             val info = AccessibilityNodeInfo.obtain(host, id)
@@ -183,14 +184,16 @@ object VirtualKeys {
         }
 
         override fun performAction(virtualViewId: Int, action: Int, arguments: Bundle?): Boolean = try {
-            if (virtualViewId == HOST) host.performAccessibilityAction(action, arguments)
-            else keyAction(virtualViewId, action)
+            hostRef.get()?.let { host ->
+                if (virtualViewId == HOST) host.performAccessibilityAction(action, arguments)
+                else keyAction(host, virtualViewId, action)
+            } ?: false
         } catch (t: Throwable) {
             L.hookError("VirtualKeys.performAction", t)
             false
         }
 
-        private fun keyAction(id: Int, action: Int): Boolean {
+        private fun keyAction(host: View, id: Int, action: Int): Boolean {
             val s = state(host)
             val k = s.keys.getOrNull(id) ?: return false
             return when (action) {

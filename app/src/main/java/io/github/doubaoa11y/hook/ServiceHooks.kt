@@ -36,6 +36,7 @@ object ServiceHooks {
                 ClipboardNav.onKeyboardShown()
                 val identity = "${ei?.packageName}/${ei?.fieldId}/${ei?.inputType}"
                 if (editorIdentity != identity || p.args[1] != true) {
+                    KeyboardOps.cancelOrganizeWatch()
                     Voice.onInputEnd()
                     TypingEcho.reset()
                     Candidates.reset("换输入框")
@@ -55,12 +56,17 @@ object ServiceHooks {
         installHideHooks(cl)
         Hooker.method(c, "onComputeInsets", arrayOf(android.inputmethodservice.InputMethodService.Insets::class.java),
             SafeHook("fullscreen.insets", after = { p -> FullscreenMode.onComputeInsets(p.args[0]) }))
-        Hooker.method(c, "onDestroy", arrayOf(), SafeHook("fullscreen.destroy", before = { _ ->
-            FullscreenMode.shutdown()
-            ReaderControl.hidden()
-            TatansBridge.onHidden()
-            EditOptions.onKeyboardHidden()
-            Speaker.stop()
+        Hooker.method(c, "onDestroy", arrayOf(), SafeHook("fullscreen.destroy", before = { p ->
+            if (ViewA11yHooks.service !== p.thisObject) return@SafeHook
+            try {
+                FullscreenMode.shutdown()
+                ReaderControl.hidden()
+                TatansBridge.onHidden()
+                EditOptions.onKeyboardHidden()
+                Speaker.stop()
+            } finally {
+                if (ViewA11yHooks.service === p.thisObject) ViewA11yHooks.service = null
+            }
         }))
         Hooker.method(c, "onWindowShown", arrayOf(), SafeHook("onWindowShown", after = { _ ->
             cancelHide("onWindowShown")
@@ -212,6 +218,13 @@ object ServiceHooks {
         "豆包版本未知"
     }
 
+    private fun statusExtras() = android.os.Bundle().apply {
+        putInt("moduleVersion", ConfigSpec.MODULE_VERSION_CODE)
+        putBoolean("active", VirtualKeys.enabled)
+        putBoolean("sync_upperOperation", Config.b("upperOperation"))
+        for (key in ConfigSpec.TOOLBAR_TOGGLE_KEYS) putBoolean("sync_$key", Config.b(key))
+    }
+
     private fun registerReceiver(ctx: Context) {
         val r = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
@@ -252,10 +265,29 @@ object ServiceHooks {
                         return
                     }
                     handle(intent)
+                    if (cmd == ConfigSpec.CMD_LOG_COPY) {
+                        val ordered = isOrderedBroadcast
+                        val extras = if (ordered) statusExtras() else null
+                        val pending = goAsync()
+                        Thread({
+                            try {
+                                val message = LogStore.copy(ctx)
+                                if (ordered) {
+                                    pending.resultCode = Activity.RESULT_OK
+                                    pending.resultData = message
+                                    pending.setResultExtras(extras)
+                                }
+                            } catch (t: Throwable) {
+                                L.hookError("ServiceHooks.logCopy", t)
+                            } finally {
+                                pending.finish()
+                            }
+                        }, "DoubaoLogCopy").start()
+                        return
+                    }
                     val msg = when (cmd) {
                         ConfigSpec.CMD_EDIT_ADD -> EditHooks.setToolbar(true)
                         ConfigSpec.CMD_EDIT_REMOVE -> EditHooks.setToolbar(false)
-                        ConfigSpec.CMD_LOG_COPY -> LogStore.copy(ctx)
                         ConfigSpec.CMD_LOG_SAVE -> LogStore.save(ctx)
                         ConfigSpec.CMD_LOG_CLEAR -> LogStore.clear()
                         ConfigSpec.CMD_NATIVE_SCAN -> NativeBackup.scanDataTree(ctx)
@@ -266,14 +298,7 @@ object ServiceHooks {
                         resultCode = Activity.RESULT_OK
                         resultData = msg ?: if (cmd == null) "已保存" else shortStatus(ctx)
                         // 豆包里正在运行的模块版本及在输入法内直接切换过的开关状态
-                        setResultExtras(android.os.Bundle().apply {
-                            putInt("moduleVersion", ConfigSpec.MODULE_VERSION_CODE)
-                            putBoolean("active", VirtualKeys.enabled)
-                            putBoolean("sync_upperOperation", Config.b("upperOperation"))
-                            for (k in ConfigSpec.TOOLBAR_TOGGLE_KEYS) {
-                                putBoolean("sync_$k", Config.b(k))
-                            }
-                        })
+                        setResultExtras(statusExtras())
                         L.i("状态：${status(ctx)}")
                     }
                 } catch (t: Throwable) {

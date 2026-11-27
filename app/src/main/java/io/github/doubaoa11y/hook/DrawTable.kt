@@ -123,8 +123,17 @@ class DrawTable(var windowName: String) {
     var height = 0
     var frames = 0L
     var drawsOutsideOnDraw = 0L
-    var changed = false
+    var revision = 0L
+        private set
+    private var accessibilityRevision = 0L
+    var dumpRevision = 0L
     var lastDumpText: String? = null
+
+    @JvmName("scheduleAccessibilityIfChanged")
+    internal inline fun scheduleAccessibilityIfChanged(schedule: () -> Boolean) {
+        val current = revision
+        if (current != accessibilityRevision && schedule()) accessibilityRevision = current
+    }
 
     /** 本帧画过预览气泡，之后的绘制项都属于气泡 */
     var inPopup = false
@@ -134,18 +143,18 @@ class DrawTable(var windowName: String) {
         inPopup = false
         val before = items.size
         items.removeAll { Rect.intersects(it.rect, dirty) || it.rect.isEmpty && dirty.contains(it.rect.left, it.rect.top) }
-        if (items.size != before) changed = true
+        if (items.size != before) revision++
     }
 
     fun add(item: DrawItem) {
         if (inPopup) item.popup = true
         items.add(item)
-        changed = true
+        revision++
     }
 
     fun clear() {
         items.clear()
-        changed = true
+        revision++
     }
 
     /** 把绘制项归并成键 */

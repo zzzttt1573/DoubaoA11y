@@ -345,15 +345,28 @@ object TatansBridge {
     }
 
     private var listenedRoot: View? = null
+    private val layoutListener = ViewTreeObserver.OnGlobalLayoutListener { update("布局变化") }
+
+    private fun unlisten() {
+        val root = listenedRoot ?: return
+        listenedRoot = null
+        try {
+            root.viewTreeObserver.removeOnGlobalLayoutListener(layoutListener)
+        } catch (t: Throwable) {
+            L.hookError("TatansBridge.unlisten", t)
+        }
+    }
 
     /** 键盘显示：按键盘区域设置穿透，布局变化时跟着更新 */
     fun onShown() {
         visible = true
         refresh("键盘显示")
-        val root = imeRoot() ?: return
+        val root = imeRoot()
         if (listenedRoot !== root) {
+            unlisten()
+            if (root == null) return
             try {
-                root.viewTreeObserver.addOnGlobalLayoutListener(ViewTreeObserver.OnGlobalLayoutListener { update("布局变化") })
+                root.viewTreeObserver.addOnGlobalLayoutListener(layoutListener)
                 listenedRoot = root
             } catch (t: Throwable) {
                 L.hookError("TatansBridge.listen", t)
@@ -363,6 +376,7 @@ object TatansBridge {
     }
 
     fun onHidden() {
+        unlisten()
         visible = false
         readerEventsSuppressed = false
         send(Rect(), "键盘收起", suppress = false)

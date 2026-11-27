@@ -895,35 +895,54 @@ object ToolbarInject {
         iv.setImageDrawable(ToolGlyphDrawable(key, fg, ctx.resources.displayMetrics.density, inOptionCard = true, drawCard = drawCard))
     }
 
-    private fun readAdapterScale(adapter: Any): Float {
-        try {
-            val m = adapter.javaClass.declaredMethods.firstOrNull {
-                !Modifier.isStatic(it.modifiers) &&
-                    it.parameterTypes.isEmpty() &&
-                    it.returnType == Float::class.javaPrimitiveType
+    private class AdapterMembers(val type: Class<*>) {
+        private fun <T : java.lang.reflect.AccessibleObject> resolve(label: String, find: () -> List<T>): T? =
+            try {
+                val matches = find()
+                if (matches.size != 1) L.w("工具栏 ${type.name} $label 候选数 ${matches.size}")
+                matches.firstOrNull()?.apply { isAccessible = true }
+            } catch (t: Throwable) {
+                L.hookError("ToolbarInject.resolve ${type.name} $label", t)
+                null
             }
-            if (m != null) {
-                m.isAccessible = true
-                val v = m.invoke(adapter) as? Float
-                if (v != null && v in 0.5f..2.0f) return v
+
+        val scale = resolve("比例") {
+            type.declaredMethods.filter {
+                !Modifier.isStatic(it.modifiers) && it.parameterTypes.isEmpty() && it.returnType == Float::class.javaPrimitiveType
             }
-        } catch (_: Throwable) {
         }
-        return 1.0f
+        val landscape = resolve("横屏") {
+            type.declaredFields.filter {
+                !Modifier.isStatic(it.modifiers) && Modifier.isFinal(it.modifiers) && it.type == Boolean::class.javaPrimitiveType
+            }
+        }
+        private val warned = HashSet<String>()
+        @Synchronized fun warn(label: String, t: Throwable) {
+            if (warned.add(label)) L.hookError("ToolbarInject.read ${type.name} $label", t)
+        }
+    }
+
+    private val members = HashMap<Class<*>, AdapterMembers>()
+    private fun members(adapter: Any) = synchronized(members) {
+        members.getOrPut(adapter.javaClass) { AdapterMembers(adapter.javaClass) }
+    }
+
+    private fun readAdapterScale(adapter: Any): Float {
+        val fields = members(adapter)
+        return try {
+            (fields.scale?.invoke(adapter) as? Float)?.takeIf { it in 0.5f..2.0f } ?: 1f
+        } catch (t: Throwable) {
+            fields.warn("比例", t)
+            1f
+        }
     }
 
     private fun isAdapterLandscape(adapter: Any, ctx: Context): Boolean {
+        val fields = members(adapter)
         try {
-            val f = adapter.javaClass.declaredFields.firstOrNull {
-                !Modifier.isStatic(it.modifiers) &&
-                    Modifier.isFinal(it.modifiers) &&
-                    it.type == Boolean::class.javaPrimitiveType
-            }
-            if (f != null) {
-                f.isAccessible = true
-                return f.getBoolean(adapter)
-            }
-        } catch (_: Throwable) {
+            fields.landscape?.let { return it.getBoolean(adapter) }
+        } catch (t: Throwable) {
+            fields.warn("横屏", t)
         }
         return ctx.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     }
