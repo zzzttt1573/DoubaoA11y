@@ -553,13 +553,21 @@ object EditActions {
             scheduleAfterSelection(info.full, isEcho = true, afterSelMs = d, fallbackMs = SelectionOverrideTiming.fallbackMs(d))
             return
         }
+        val explain = info.explainOnly
+        // 关闭字词/字母解释（或解说读屏下当前字无需解释）时，不启动停手补念，彻底零延迟交给读屏原生播报
+        if (explain == null && (!Config.b("fsCursorExplainWord") && !Config.b("fsCursorExplainLetter") ||
+                A11yState.readerPackage == "com.nirenr.talkman")) {
+            main.removeCallbacks(burstRunner)
+            rapidMove.reset()
+            return
+        }
         val now = SystemClock.uptimeMillis()
         main.removeCallbacks(burstRunner)
         if (rapidMove.record(now, info.full)) {
             main.postDelayed(burstRunner, 95L)
             return
         }
-        val explain = info.explainOnly ?: return
+        if (explain == null) return
         val delay = if (A11yState.readerPackage == "com.nirenr.talkman" || A11yState.readerPackage.isEmpty()) 130L else 110L
         scheduleAfterSelection(explain, isEcho = true, afterSelMs = delay, fallbackMs = delay + 50L)
     }
