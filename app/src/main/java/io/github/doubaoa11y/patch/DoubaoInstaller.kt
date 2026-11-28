@@ -1,28 +1,21 @@
 package io.github.doubaoa11y.patch
 
 import android.app.Activity
-import android.app.PendingIntent
-import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
 import android.net.Uri
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
 import android.provider.Settings
 import android.view.inputmethod.InputMethodManager
 import io.github.doubaoa11y.ConfigSpec
 import io.github.doubaoa11y.SettingsProvider
 import io.github.doubaoa11y.ui.AppStorage
 import java.io.File
-import java.security.SecureRandom
-import java.util.WeakHashMap
 
 /**
  * 豆包输入法的卸载、单包/分包安装与系统输入法设置跳转封装。
@@ -35,7 +28,6 @@ import java.util.WeakHashMap
  *   RECEIVER_EXPORTED 随机 action，并完整记录与透出 EXTRA_STATUS_MESSAGE。
  */
 object DoubaoInstaller {
-    private const val ACTION_INSTALL_PREFIX = "io.github.doubaoa11y.DOUBAO_INSTALL_RESULT"
     private const val APK_MIME = "application/vnd.android.package-archive"
     private val KNOWN_SYSTEM_INSTALLERS = listOf(
         "com.google.android.packageinstaller",
@@ -48,8 +40,6 @@ object DoubaoInstaller {
         "com.huawei.appmarket",
         "com.hihonor.appmarket"
     )
-    private val main = Handler(Looper.getMainLooper())
-    private val activeReceivers = WeakHashMap<Activity, BroadcastReceiver>()
 
     fun canInstall(context: Context): Boolean {
         return Build.VERSION.SDK_INT < 26 || context.packageManager.canRequestPackageInstalls()
@@ -102,11 +92,7 @@ object DoubaoInstaller {
     }
 
     fun detach(act: Activity) {
-        val r = activeReceivers.remove(act) ?: return
-        try {
-            act.unregisterReceiver(r)
-        } catch (_: Throwable) {
-        }
+        InstallSession.detach(act)
     }
 
     /**
@@ -129,7 +115,7 @@ object DoubaoInstaller {
             false
         }
         val canUseSingleView = !forceSession &&
-            prepared.splitApks.isEmpty() &&
+            prepared.singleApk &&
             (!prepared.isHotUpdate || !hasInstalledSplits)
 
         PatchLog.i(
@@ -156,7 +142,6 @@ object DoubaoInstaller {
         installViaSession(
             act,
             prepared,
-            allowActionViewFallback = !forceSession && prepared.splitApks.isEmpty() && !canUseSingleView,
             onStatus = onStatus
         )
     }
@@ -317,180 +302,18 @@ object DoubaoInstaller {
     private fun installViaSession(
         act: Activity,
         prepared: ApkPatcher.PreparedOutput,
-        allowActionViewFallback: Boolean,
         onStatus: (done: Boolean, ok: Boolean, msg: String) -> Unit
     ) {
-        val files = mutableListOf<Pair<String, File>>()
-        files.add("base.apk" to prepared.baseApk)
-        prepared.splitApks.forEachIndexed { idx, f ->
-            files.add("split_$idx.apk" to f)
-        }
-
-        val mode = if (prepared.isHotUpdate) {
-            PackageInstaller.SessionParams.MODE_INHERIT_EXISTING
-        } else {
-            PackageInstaller.SessionParams.MODE_FULL_INSTALL
-        }
-
-        Thread {
-            try {
-                val pi = act.packageManager.packageInstaller
-                val params = PackageInstaller.SessionParams(mode).apply {
-                    setAppPackageName(ConfigSpec.TARGET_PACKAGE)
-                    setSize(files.sumOf { it.second.length() })
-                }
-                val sessionId = pi.createSession(params)
-                PatchLog.i(act, "已创建 PackageInstaller.Session id=$sessionId mode=$mode files=${files.size}")
-                val session = pi.openSession(sessionId)
-                try {
-                    for ((name, file) in files) {
-                        session.openWrite(name, 0, file.length()).use { out ->
-                            file.inputStream().use { it.copyTo(out, 64 * 1024) }
-                            session.fsync(out)
-                        }
-                    }
-
-                    main.post {
-                        if (act.isFinishing) {
-                            try { session.abandon() } catch (_: Throwable) {}
-                            try { session.close() } catch (_: Throwable) {}
-                            return@post
-                        }
-                        detach(act)
-                        val nonce = ByteArray(6).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it) }
-                        val action = "$ACTION_INSTALL_PREFIX.$sessionId.$nonce"
-                        val receiver = object : BroadcastReceiver() {
-                            override fun onReceive(c: Context, intent: Intent) {
-                                val rxSessionId = intent.getIntExtra(PackageInstaller.EXTRA_SESSION_ID, sessionId)
-                                if (rxSessionId != sessionId) return
-                                val status = intent.getIntExtra(
-                                    PackageInstaller.EXTRA_STATUS,
-                                    PackageInstaller.STATUS_FAILURE
-                                )
-                                val detail = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE).orEmpty().trim()
-                                PatchLog.i(act, "收到安装会话回调：session=$sessionId status=$status detail=$detail")
-                                when (status) {
-                                    PackageInstaller.STATUS_PENDING_USER_ACTION -> {
-                                        @Suppress("DEPRECATION")
-                                        val confirm = intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
-                                        if (confirm != null) {
-                                            val started = startConfirmActivity(act, confirm)
-                                            if (started == null) {
-                                                onStatus(false, true, "请在系统弹窗中确认安装豆包输入法")
-                                            } else {
-                                                detach(act)
-                                                if (allowActionViewFallback && launchActionViewInstall(act, prepared.baseApk) == null) {
-                                                    onStatus(false, true, "已改用系统安装界面打开，请在弹窗中确认安装并返回本页")
-                                                } else {
-                                                    onStatus(true, false, "无法打开系统安装界面：$started")
-                                                }
-                                            }
-                                        } else {
-                                            PatchLog.w(act, "STATUS_PENDING_USER_ACTION 缺少 EXTRA_INTENT")
-                                            detach(act)
-                                            if (allowActionViewFallback && launchActionViewInstall(act, prepared.baseApk) == null) {
-                                                onStatus(false, true, "已改用系统安装界面打开，请在弹窗中确认安装并返回本页")
-                                            } else {
-                                                onStatus(true, false, "系统安装器未返回确认界面，请尝试“导出安装包到文件夹”后手动安装")
-                                            }
-                                        }
-                                    }
-                                    PackageInstaller.STATUS_SUCCESS -> {
-                                        detach(act)
-                                        ApkPatcher.clearPrepared(act)
-                                        onStatus(true, true, "修补版豆包输入法安装成功")
-                                    }
-                                    PackageInstaller.STATUS_FAILURE_ABORTED -> {
-                                        detach(act)
-                                        if (allowActionViewFallback && launchActionViewInstall(act, prepared.baseApk) == null) {
-                                            PatchLog.w(act, "Session 返回 ABORTED，已自动降级为 ACTION_VIEW")
-                                            onStatus(false, true, "系统会话安装被取消，已改用标准安装界面打开，请确认安装后返回本页")
-                                        } else {
-                                            val extra = if (detail.isNotEmpty()) "（系统返回：$detail）" else "（状态码 $status，可能被系统拦截或手动取消）"
-                                            onStatus(true, false, "已取消安装$extra。可尝试“导出安装包到文件夹”后用文件管理器手动安装。")
-                                        }
-                                    }
-                                    else -> {
-                                        detach(act)
-                                        val friendly = when (status) {
-                                            PackageInstaller.STATUS_FAILURE_CONFLICT ->
-                                                "安装冲突：请先卸载原版豆包输入法，再点安装"
-                                            PackageInstaller.STATUS_FAILURE_STORAGE ->
-                                                "手机存储空间不足，请清理空间后重试"
-                                            PackageInstaller.STATUS_FAILURE_INCOMPATIBLE ->
-                                                "安装包不兼容当前系统或架构"
-                                            PackageInstaller.STATUS_FAILURE_INVALID ->
-                                                "安装包解析或校验未通过"
-                                            else -> "安装失败（状态码 $status）"
-                                        }
-                                        val suffix = if (detail.isNotEmpty()) "：$detail" else ""
-                                        onStatus(true, false, "$friendly$suffix")
-                                    }
-                                }
-                            }
-                        }
-                        activeReceivers[act] = receiver
-                        val filter = IntentFilter(action)
-                        // Android 13 (API 33) 上 system_server 通过 PendingIntent 投递到动态 RECEIVER_NOT_EXPORTED
-                        // 在部分 ROM 存在拦截问题；此处用每次会话唯一的随机 action + 校验 EXTRA_SESSION_ID，配合 RECEIVER_EXPORTED
-                        if (Build.VERSION.SDK_INT >= 33) {
-                            act.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
-                        } else {
-                            act.registerReceiver(receiver, filter)
-                        }
-                        val piFlags = PendingIntent.FLAG_UPDATE_CURRENT or
-                            (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0)
-                        val pending = PendingIntent.getBroadcast(
-                            act,
-                            sessionId,
-                            Intent(action).setPackage(act.packageName),
-                            piFlags
-                        )
-                        session.commit(pending.intentSender)
-                        session.close()
-                        PatchLog.i(act, "已提交 PackageInstaller.Session id=$sessionId")
-                    }
-                } catch (t: Throwable) {
-                    try { session.abandon() } catch (_: Throwable) {}
-                    try { session.close() } catch (_: Throwable) {}
-                    throw t
-                }
-            } catch (t: Throwable) {
-                PatchLog.e(act, "PackageInstaller.Session 提交失败", t)
-                main.post {
-                    if (!act.isFinishing) {
-                        onStatus(true, false, "打开安装器失败：${t.message ?: t.javaClass.simpleName}")
-                    }
-                }
-            }
-        }.start()
-    }
-
-    /**
-     * 前台 Activity 直接启动 confirm Intent（不盲目加 FLAG_ACTIVITY_NEW_TASK，避免 Android 10–13 ROM 直接取消会话）；
-     * 若抛异常再加 FLAG_ACTIVITY_NEW_TASK 重试一次。返回 null 表示成功启动。
-     */
-    private fun startConfirmActivity(act: Activity, confirm: Intent): String? {
-        try {
-            act.startActivity(confirm)
-            PatchLog.i(act, "已由前台 Activity 直接拉起系统安装确认页")
-            return null
-        } catch (t1: Throwable) {
-            PatchLog.w(act, "前台直接拉起确认页失败（${t1.javaClass.simpleName}: ${t1.message}），尝试附加 NEW_TASK")
-            return try {
-                confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                act.startActivity(confirm)
-                PatchLog.i(act, "已通过 NEW_TASK 拉起系统安装确认页")
-                null
-            } catch (t2: Throwable) {
-                PatchLog.e(act, "附加 NEW_TASK 拉起系统安装确认页仍失败", t2)
-                t2.message ?: t2.javaClass.simpleName
-            }
-        }
+        val app = act.applicationContext
+        val mode = if (prepared.isHotUpdate) PackageInstaller.SessionParams.MODE_INHERIT_EXISTING
+            else PackageInstaller.SessionParams.MODE_FULL_INSTALL
+        InstallSession.install(act, ConfigSpec.TARGET_PACKAGE, mode, listOf(prepared.baseApk) + prepared.splitApks,
+            onSuccess = { ApkPatcher.clearPrepared(app, prepared) }, callback = onStatus)
     }
 
     /** 将修补好的安装包导出到 内部存储/豆包输入法无障碍/安装包/ 供特殊机型通过文件管理器手动安装 */
     fun exportPreparedApk(ctx: Context, prepared: ApkPatcher.PreparedOutput): File {
+        require(prepared.singleApk) { "分包必须使用系统会话完整安装" }
         val dir = AppStorage.apksDir()
         dir.mkdirs()
         val name = "豆包输入法_${prepared.doubaoVersionName}_含无障碍${ConfigSpec.MODULE_VERSION_NAME}.apk"

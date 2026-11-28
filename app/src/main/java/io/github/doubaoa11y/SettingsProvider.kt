@@ -33,23 +33,29 @@ class SettingsProvider : ContentProvider() {
             }
             "setUpperOperation" -> Bundle().apply {
                 require(extras?.get("upperOperation") is Boolean)
-                putBoolean("saved", p.edit().putBoolean("upperOperation", extras!!.getBoolean("upperOperation")).commit())
+                synchronized(Companion) {
+                    pendingKeys.remove("upperOperation")
+                    putBoolean("saved", p.edit().putBoolean("upperOperation", extras!!.getBoolean("upperOperation")).commit())
+                }
             }
             "setToolbar" -> Bundle().apply {
-                val ed = p.edit()
-                var any = false
-                for (k in ConfigSpec.TOOLBAR_TOGGLE_KEYS) {
-                    if (extras?.get(k) is Boolean) {
-                        ed.putBoolean(k, extras.getBoolean(k))
+                synchronized(Companion) {
+                    val ed = p.edit()
+                    var any = false
+                    for (k in ConfigSpec.TOOLBAR_TOGGLE_KEYS) {
+                        if (extras?.get(k) is Boolean) {
+                            pendingKeys.remove(k)
+                            ed.putBoolean(k, extras.getBoolean(k))
+                            any = true
+                        }
+                    }
+                    if (extras?.get("toolbarCustomOrder") is String) {
+                        ed.putString("toolbarCustomOrder", extras.getString("toolbarCustomOrder").orEmpty().take(4000))
                         any = true
                     }
+                    require(any)
+                    putBoolean("saved", ed.commit())
                 }
-                if (extras?.get("toolbarCustomOrder") is String) {
-                    ed.putString("toolbarCustomOrder", extras.getString("toolbarCustomOrder").orEmpty().take(4000))
-                    any = true
-                }
-                require(any)
-                putBoolean("saved", ed.commit())
             }
             "speak" -> Bundle().apply {
                 val text = extras?.getString("text").orEmpty()
@@ -247,12 +253,40 @@ class SettingsProvider : ContentProvider() {
     override fun update(uri: Uri, values: ContentValues?, selection: String?, selectionArgs: Array<out String>?) = 0
     companion object {
         val URI: Uri = Uri.parse("content://${ConfigSpec.SETTINGS_AUTHORITY}/config")
+        const val REQUEST_ID = "configRequestId"
+        private var sequence = 0L
+        private val pendingKeys = mutableMapOf<String, Boolean>()
+
+        @Synchronized
+        fun recordRequest(intent: android.content.Intent, prefs: android.content.SharedPreferences): Long {
+            val id = ++sequence
+            intent.putExtra(REQUEST_ID, id)
+            pendingKeys.clear()
+            for (item in ConfigSpec.items) {
+                if (item.key == "upperOperation" || item.key in ConfigSpec.TOOLBAR_TOGGLE_KEYS) {
+                    val value = prefs.getBoolean(item.key, item.default)
+                    pendingKeys[item.key] = value
+                    intent.putExtra(item.key, value)
+                }
+            }
+            return id
+        }
+
+        @Synchronized
+        fun applyReceipt(prefs: android.content.SharedPreferences, id: Long, extras: Bundle) {
+            // 旧模块没有序号，ordered broadcast 自身仍绑定发送时的 id。
+            if (id != sequence || extras.getLong(REQUEST_ID, id) != id) return
+            val edit = prefs.edit()
+            for ((key, sent) in pendingKeys) {
+                val value = extras.get("sync_$key") as? Boolean ?: continue
+                if (prefs.getBoolean(key, sent) == sent) edit.putBoolean(key, value)
+            }
+            pendingKeys.clear()
+            edit.apply()
+        }
+
         private const val PATCHED_APK_DISPLAY_NAME = "DoubaoA11y_patched.apk"
-        private const val GRANT_RECORD_NAME = "apk_grant.txt"
-        private val TOKEN_RE = Regex("^[a-f0-9]{16,64}$")
-        private val apkGrantLock = Any()
-        private var activeApkToken: String? = null
-        private var activeApkFile: java.io.File? = null
+        private val TOKEN_RE = Regex("^[a-f0-9]{32}$")
 
         private fun extractPatchedApkToken(segments: List<String>?): String? {
             if (segments == null || segments.size !in 2..3 || segments[0] != "patched_apk") return null
@@ -261,50 +295,19 @@ class SettingsProvider : ContentProvider() {
             return if (TOKEN_RE.matches(token)) token else null
         }
 
-        private fun grantRecordFile(ctx: Context): java.io.File =
-            java.io.File(java.io.File(ctx.cacheDir, "patched_doubao"), GRANT_RECORD_NAME)
-
         fun issuePatchedApkUri(ctx: Context, apkFile: java.io.File): Uri {
-            val bytes = ByteArray(16)
-            java.security.SecureRandom().nextBytes(bytes)
-            val token = bytes.joinToString("") { "%02x".format(it) }
-            synchronized(apkGrantLock) {
-                activeApkToken = token
-                activeApkFile = apkFile
-            }
-            // 持久化令牌记录，避免低内存机型在切到系统安装器后本进程被回收导致令牌失效
-            runCatching {
-                val rf = grantRecordFile(ctx)
-                rf.parentFile?.mkdirs()
-                rf.writeText("$token\n${apkFile.canonicalPath}", Charsets.UTF_8)
-            }
+            val token = java.util.UUID.randomUUID().toString().replace("-", "")
+            val dir = apkFile.canonicalFile.parentFile!!
+            require(dir.parentFile == io.github.doubaoa11y.patch.ApkPatcher.outputDir(ctx).canonicalFile && apkFile.name == "base.apk")
+            java.io.File(dir, "grant-$token").createNewFile()
             return Uri.parse("content://${ConfigSpec.SETTINGS_AUTHORITY}/patched_apk/$token/$PATCHED_APK_DISPLAY_NAME")
         }
 
         private fun resolvePatchedApk(ctx: Context, token: String): java.io.File? {
             if (!TOKEN_RE.matches(token)) return null
-            synchronized(apkGrantLock) {
-                if (token == activeApkToken) {
-                    val f = activeApkFile
-                    if (f != null && f.isFile) return f
-                }
-            }
-            return try {
-                val rf = grantRecordFile(ctx)
-                if (!rf.isFile) return null
-                val lines = rf.readLines(Charsets.UTF_8)
-                if (lines.size < 2 || lines[0].trim() != token) return null
-                val candidate = java.io.File(lines[1].trim()).canonicalFile
-                val allowedDir = java.io.File(ctx.cacheDir, "patched_doubao").canonicalPath
-                if (!candidate.path.startsWith(allowedDir + java.io.File.separator) || !candidate.isFile) return null
-                synchronized(apkGrantLock) {
-                    activeApkToken = token
-                    activeApkFile = candidate
-                }
-                candidate
-            } catch (_: Throwable) {
-                null
-            }
+            val root = io.github.doubaoa11y.patch.ApkPatcher.outputDir(ctx)
+            val generation = root.listFiles()?.firstOrNull { java.io.File(it, "grant-$token").isFile } ?: return null
+            return java.io.File(generation, "base.apk").takeIf { it.isFile }
         }
 
         fun xferUri(token: String): Uri =

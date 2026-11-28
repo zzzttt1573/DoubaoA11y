@@ -2,11 +2,8 @@ package io.github.doubaoa11y.ui
 
 import android.app.Activity
 import android.app.AlertDialog
-import android.app.PendingIntent
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageInstaller
 import android.net.Uri
 import android.os.Build
@@ -36,10 +33,29 @@ object Updater {
     private const val RAW_UPDATE_URL = "https://raw.githubusercontent.com/$REPO/main/$UPDATE_PATH"
     private const val API = "https://api.github.com/repos/$REPO/releases/latest"
     const val RELEASES_PAGE = "https://github.com/$REPO/releases/latest"
-    private const val ACTION_INSTALLED = "io.github.doubaoa11y.UPDATE_INSTALLED"
     private const val MAX_MANIFEST_BYTES = 256 * 1024
 
     private val main = Handler(Looper.getMainLooper())
+
+    private val dialogs = mutableMapOf<Activity, MutableMap<AlertDialog, () -> Unit>>()
+
+    private fun track(act: Activity, dialog: AlertDialog, cancel: () -> Unit = {}) {
+        dialogs.getOrPut(act) { mutableMapOf() }[dialog] = cancel
+        dialog.setOnDismissListener {
+            dialogs[act]?.let { group ->
+                group.remove(dialog)
+                if (group.isEmpty()) dialogs.remove(act)
+            }
+        }
+    }
+
+    fun detach(act: Activity) {
+        dialogs.remove(act)?.forEach { (dialog, cancel) ->
+            cancel()
+            dialog.dismiss()
+        }
+        io.github.doubaoa11y.patch.InstallSession.detach(act)
+    }
 
     private class Release(
         val version: String,
@@ -50,23 +66,24 @@ object Updater {
         val sha256: String,
     )
 
-    private fun parseVersion(raw: String): Pair<List<Int>, Boolean> {
-        val cleaned = raw.trim().removePrefix("v").removePrefix("V")
-        val match = Regex("^([0-9]+(?:\\.[0-9]+)*)(.*)$").find(cleaned)
-        if (match == null) {
-            val fallback = cleaned.split('.', '-').map { it.toIntOrNull() ?: 0 }
-            return fallback to false
-        }
-        val nums = match.groupValues[1].split('.').map { it.toIntOrNull() ?: 0 }
-        val suffix = match.groupValues[2].trim()
-        val preRelease = suffix.isNotEmpty()
-        return nums to preRelease
+    private val versionPattern = Regex("""[vV]?([0-9]+(?:\.[0-9]+)*)(-?(?:alpha|beta|rc|preview|dev)[.-]?[0-9]*)?""", RegexOption.IGNORE_CASE)
+
+    private fun parseVersion(raw: String): Pair<List<Int>, Boolean>? {
+        val match = versionPattern.matchEntire(raw.trim()) ?: return null
+        val numbers = match.groupValues[1].split('.').map { it.toIntOrNull() ?: return null }
+        return numbers to match.groupValues[2].isNotEmpty()
+    }
+
+    private fun version(json: JSONObject, key: String): String {
+        val value = (json.opt(key) as? String)?.trim().orEmpty()
+        require(parseVersion(value) != null) { "无效版本号" }
+        return value.removePrefix("v").removePrefix("V")
     }
 
     /** 版本号比较："1.1.10" > "1.1.9"；同主版本时正式版 "2.0.0" > 测试版 "2.0.0Beta" */
     fun newer(a: String, b: String): Boolean {
-        val (x, preA) = parseVersion(a)
-        val (y, preB) = parseVersion(b)
+        val (x, preA) = parseVersion(a) ?: return false
+        val (y, preB) = parseVersion(b) ?: return false
         for (i in 0 until maxOf(x.size, y.size)) {
             val p = x.getOrElse(i) { 0 }
             val q = y.getOrElse(i) { 0 }
@@ -83,6 +100,8 @@ object Updater {
     }
 
     private fun say(act: Activity, status: TextView, msg: String) {
+        if (act.isFinishing || act.isDestroyed) return
+        status.visibility = android.view.View.VISIBLE
         status.text = "更新：$msg"
         status.announceForAccessibility(msg)
     }
@@ -125,6 +144,7 @@ object Updater {
                 onCancel()
             }
             .create()
+        track(act, dialog, onCancel)
         dialog.show()
         return Triple(dialog, msgView, bar)
     }
@@ -152,21 +172,21 @@ object Updater {
             }
             main.post {
                 try { if (dialog.isShowing) dialog.dismiss() } catch (_: Throwable) {}
-                if (act.isFinishing || cancelled.get()) return@post
+                if (act.isFinishing || act.isDestroyed || cancelled.get()) return@post
                 when {
                     r == null -> AlertDialog.Builder(act)
                         .setTitle("检查更新失败")
                         .setMessage("连不上 GitHub。可能是网络不好，或者 GitHub 在你的网络下打不开。请稍后再试，或者加入QQ群获取最新版。\n$QQ_LINE")
                         .setPositiveButton("复制QQ群号") { _, _ -> copyQq(act) }
                         .setNegativeButton("关闭", null)
-                        .show().also { say(act, status, "检查更新失败") }
+                        .show().also { track(act, it); say(act, status, "检查更新失败") }
                     !isNewer(r) -> {
                         say(act, status, "已是最新版本 ${ConfigSpec.MODULE_VERSION_NAME}")
                         AlertDialog.Builder(act)
                             .setTitle("已是最新版本")
                             .setMessage("当前版本 ${ConfigSpec.MODULE_VERSION_NAME}，最新发布版本为 ${r.version}，不用更新。")
                             .setPositiveButton("确定", null)
-                            .show()
+                            .show().also { track(act, it) }
                     }
                     else -> offer(act, status, r)
                 }
@@ -191,6 +211,23 @@ object Updater {
         error("连不上 GitHub")
     }
 
+    private fun readManifest(connection: HttpURLConnection, cancelled: AtomicBoolean): JSONObject {
+        val baos = java.io.ByteArrayOutputStream()
+        connection.inputStream.use { input ->
+            val buf = ByteArray(4096)
+            var total = 0
+            while (true) {
+                if (cancelled.get()) error("已取消")
+                val n = input.read(buf)
+                if (n < 0) break
+                total += n
+                if (total > MAX_MANIFEST_BYTES) error("清单过大")
+                baos.write(buf, 0, n)
+            }
+        }
+        return JSONObject(baos.toString("UTF-8").removePrefix("\uFEFF"))
+    }
+
     private fun fetchManifest(
         urlStr: String,
         cancelled: AtomicBoolean,
@@ -209,27 +246,13 @@ object Updater {
         try {
             if (cancelled.get()) error("已取消")
             if (c.responseCode != 200) error("HTTP ${c.responseCode}")
-            val baos = java.io.ByteArrayOutputStream()
-            c.inputStream.use { input ->
-                val buf = ByteArray(4096)
-                var total = 0
-                while (true) {
-                    if (cancelled.get()) error("已取消")
-                    val n = input.read(buf)
-                    if (n < 0) break
-                    total += n
-                    if (total > MAX_MANIFEST_BYTES) error("清单过大")
-                    baos.write(buf, 0, n)
-                }
-            }
-            val j = JSONObject(baos.toString("UTF-8").removePrefix("\uFEFF"))
-            val version = j.optString("version", "").trim().removePrefix("v").removePrefix("V")
-            require(version.isNotEmpty()) { "缺少版本号" }
+            val j = readManifest(c, cancelled)
+            val version = version(j, "version")
             val versionCode = j.optInt("versionCode", 0)
             val notes = j.optString("notes", "")
             val size = j.optLong("apkSize", 0L)
             val sha256 = j.optString("sha256", "").trim().lowercase()
-                .takeIf { it.matches(Regex("^[a-f0-9]{64}$")) }.orEmpty()
+                .also { require(it.isEmpty() || it.matches(Regex("^[a-f0-9]{64}$"))) { "无效 SHA-256" } }
             val urls = LinkedHashSet<String>()
             val arr = j.optJSONArray("apkUrls")
             if (arr != null) {
@@ -262,7 +285,7 @@ object Updater {
         try {
             if (cancelled.get()) error("已取消")
             if (c.responseCode != 200) error("HTTP ${c.responseCode}")
-            val j = JSONObject(c.inputStream.bufferedReader().readText())
+            val j = readManifest(c, cancelled)
             val assets = j.optJSONArray("assets")
             val urls = ArrayList<String>()
             var size = 0L
@@ -277,13 +300,13 @@ object Updater {
                         val digest = a.optString("digest", "").trim()
                         if (digest.startsWith("sha256:", true)) {
                             sha256 = digest.substring(7).lowercase()
-                                .takeIf { it.matches(Regex("^[a-f0-9]{64}$")) }.orEmpty()
+                                .also { require(it.isEmpty() || it.matches(Regex("^[a-f0-9]{64}$"))) { "无效 SHA-256" } }
                         }
                         break
                     }
                 }
             }
-            return Release(j.optString("tag_name").removePrefix("v").removePrefix("V"), 0, j.optString("body"), urls, size, sha256)
+            return Release(version(j, "tag_name"), 0, j.optString("body"), urls, size, sha256)
         } finally {
             connRef.compareAndSet(c, null)
             c.disconnect()
@@ -297,11 +320,11 @@ object Updater {
         val b = AlertDialog.Builder(act)
             .setTitle("发现新版本 ${r.version}")
             .setMessage("当前 ${ConfigSpec.MODULE_VERSION_NAME}，最新 ${r.version}$size。\n\n" +
-                "更新完成后，一定要强行停止一次豆包输入法，新版本才会生效。\n\n$notes")
+                notes)
             .setNegativeButton("以后再说", null)
         if (r.apkUrls.isNotEmpty()) b.setPositiveButton("下载并安装") { _, _ -> download(act, status, r) }
         else b.setPositiveButton("用浏览器打开下载页") { _, _ -> openPage(act) }
-        b.show()
+        b.show().also { track(act, it) }
     }
 
     private const val QQ_LINE = "QQ群：乐天的居家小屋，${SettingsActivity.QQ_GROUP}"
@@ -336,11 +359,11 @@ object Updater {
                     }
                 }
                 .setNegativeButton("取消", null)
-                .show()
+                .show().also { track(act, it) }
             return
         }
         say(act, status, "正在下载 ${r.version}…")
-        val file = File(act.cacheDir, "update.apk")
+        val file = File(act.cacheDir, "update-${java.util.UUID.randomUUID()}.apk")
         val cancelled = AtomicBoolean(false)
         val connRef = AtomicReference<HttpURLConnection?>(null)
         val (dialog, msgView, bar) = buildProgressDialog(
@@ -364,7 +387,7 @@ object Updater {
                 if (cancelled.get()) break
                 if (idx > 0) {
                     main.post {
-                        if (!act.isFinishing && !cancelled.get()) {
+                        if (!act.isFinishing && !act.isDestroyed && !cancelled.get()) {
                             bar.isIndeterminate = true
                             msgView.text = "正在切换备用线路下载（第 ${idx + 1}/${r.apkUrls.size} 条）…"
                         }
@@ -374,7 +397,7 @@ object Updater {
                     try { file.delete() } catch (_: Throwable) {}
                     save(apkUrl, file, cancelled, connRef) { pct, done, total ->
                         main.post {
-                            if (act.isFinishing || cancelled.get()) return@post
+                            if (act.isFinishing || act.isDestroyed || cancelled.get()) return@post
                             if (total > 0) {
                                 bar.isIndeterminate = false
                                 bar.progress = pct
@@ -390,6 +413,7 @@ object Updater {
                             }
                         }
                     }
+                    require(file.length() > 0 && (r.apkSize <= 0 || file.length() == r.apkSize)) { "安装包大小不符" }
                     if (r.sha256.isNotEmpty() && !verifySha256(file, r.sha256)) {
                         error("安装包校验失败")
                     }
@@ -405,7 +429,7 @@ object Updater {
             }
             main.post {
                 try { if (dialog.isShowing) dialog.dismiss() } catch (_: Throwable) {}
-                if (act.isFinishing || cancelled.get()) {
+                if (act.isFinishing || act.isDestroyed || cancelled.get()) {
                     try { file.delete() } catch (_: Throwable) {}
                     return@post
                 }
@@ -417,7 +441,7 @@ object Updater {
                         .setMessage("${reason}可以再试一次，或者加入QQ群获取最新版。\n$QQ_LINE")
                         .setPositiveButton("复制QQ群号") { _, _ -> copyQq(act) }
                         .setNegativeButton("关闭", null)
-                        .show()
+                        .show().also { track(act, it) }
                     say(act, status, "下载失败")
                     return@post
                 }
@@ -494,7 +518,7 @@ object Updater {
                     }
                 }
                 if (cancelled.get()) error("已取消")
-                if (total > 0 && done != total) error("没下完")
+                if (done <= 0 || done != out.length() || (total >= 0 && done != total)) error("没下完")
                 return
             } finally {
                 connRef.compareAndSet(c, null)
@@ -506,50 +530,11 @@ object Updater {
 
     /** 用系统安装器装下载好的 apk（安装会结束本应用，下次打开时提示强行停止豆包） */
     private fun install(act: Activity, status: TextView, file: File) {
-        try {
-            val pi = act.packageManager.packageInstaller
-            val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
-            params.setAppPackageName(act.packageName)
-            val id = pi.createSession(params)
-            pi.openSession(id).use { s ->
-                s.openWrite("update.apk", 0, file.length()).use { o -> file.inputStream().use { it.copyTo(o) } }
-                val filter = IntentFilter(ACTION_INSTALLED)
-                val receiver = object : BroadcastReceiver() {
-                    override fun onReceive(c: Context, i: Intent) {
-                        when (i.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)) {
-                            PackageInstaller.STATUS_PENDING_USER_ACTION -> {
-                                @Suppress("DEPRECATION")
-                                val confirm = i.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
-                                if (confirm != null) {
-                                    try {
-                                        act.startActivity(confirm)
-                                    } catch (_: Throwable) {
-                                        confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                        c.startActivity(confirm)
-                                    }
-                                }
-                            }
-                            PackageInstaller.STATUS_SUCCESS -> say(act, status, "更新已安装")
-                            else -> {
-                                val msg = i.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: ""
-                                say(act, status, "安装没有完成 $msg")
-                                try { c.unregisterReceiver(this) } catch (_: Throwable) {}
-                            }
-                        }
-                    }
-                }
-                if (Build.VERSION.SDK_INT >= 33) act.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
-                else act.registerReceiver(receiver, filter)
-                val flags = PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0)
-                val pending = PendingIntent.getBroadcast(act, id, Intent(ACTION_INSTALLED).setPackage(act.packageName), flags)
-                s.commit(pending.intentSender)
-            }
-        } catch (t: Throwable) {
-            say(act, status, "打开安装界面失败：${t.message}")
+        io.github.doubaoa11y.patch.InstallSession.install(act, act.packageName,
+            PackageInstaller.SessionParams.MODE_FULL_INSTALL, listOf(file), afterCopy = { file.delete() }) { _, _, msg ->
+            say(act, status, msg)
         }
     }
-
-    // ---------------- 更新后：提示强行停止豆包输入法 ----------------
 
     /** 打开豆包输入法的应用信息页（里面有“强行停止”） */
     fun openDoubaoInfo(act: Activity) {
@@ -565,18 +550,25 @@ object Updater {
             .setMessage(msg)
             .setPositiveButton("打开豆包输入法的应用信息") { _, _ -> openDoubaoInfo(act) }
             .setNegativeButton("知道了", null)
-            .show()
+            .show().also { track(act, it) }
     }
 
     /** 这次打开时模块版本比上次高（刚更新过）：提示强行停止豆包输入法 */
-    fun afterUpdate(act: Activity) {
+    fun afterUpdate(act: SettingsActivity, integrated: Boolean) {
         val prefs = act.getSharedPreferences("settings", Context.MODE_PRIVATE)
         val last = prefs.getInt("lastVersionCode", 0)
         prefs.edit().putInt("lastVersionCode", ConfigSpec.MODULE_VERSION_CODE).apply()
-        try { File(act.cacheDir, "update.apk").delete() } catch (_: Throwable) {}
+
         if (last != 0 && last < ConfigSpec.MODULE_VERSION_CODE) {
+            if (integrated) {
+                AlertDialog.Builder(act).setTitle("模块已更新")
+                    .setMessage("请一键注入新模块以同步豆包输入法。")
+                    .setPositiveButton("一键注入新模块") { _, _ -> act.openPatchWizard() }
+                    .setNegativeButton("稍后", null).show().also { track(act, it) }
+                return
+            }
             forceStopDialog(act, "模块已更新到 ${ConfigSpec.MODULE_VERSION_NAME}",
-                "请在豆包输入法的应用信息里点“强行停止”，再弹出一次键盘，新版本才会生效。用 LSPatch 集成模式的，要用新模块重新修补豆包。")
+                "请在豆包输入法的应用信息里点“强行停止”，再弹出一次键盘，新版本才会生效。")
         }
     }
 }

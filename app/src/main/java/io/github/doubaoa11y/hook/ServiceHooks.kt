@@ -217,7 +217,9 @@ object ServiceHooks {
         "豆包版本未知"
     }
 
-    private fun statusExtras() = android.os.Bundle().apply {
+    private fun statusExtras(intent: Intent) = android.os.Bundle().apply {
+        val key = io.github.doubaoa11y.SettingsProvider.REQUEST_ID
+        if (intent.hasExtra(key)) putLong(key, intent.getLongExtra(key, -1))
         putInt("moduleVersion", ConfigSpec.MODULE_VERSION_CODE)
         putBoolean("active", VirtualKeys.enabled)
         putBoolean("sync_upperOperation", Config.b("upperOperation"))
@@ -266,7 +268,7 @@ object ServiceHooks {
                     handle(intent)
                     if (cmd == ConfigSpec.CMD_LOG_COPY) {
                         val ordered = isOrderedBroadcast
-                        val extras = if (ordered) statusExtras() else null
+                        val extras = if (ordered) statusExtras(intent) else null
                         val pending = goAsync()
                         Thread({
                             try {
@@ -297,7 +299,7 @@ object ServiceHooks {
                         resultCode = Activity.RESULT_OK
                         resultData = msg ?: if (cmd == null) "已保存" else shortStatus(ctx)
                         // 豆包里正在运行的模块版本及在输入法内直接切换过的开关状态
-                        setResultExtras(statusExtras())
+                        setResultExtras(statusExtras(intent))
                         L.i("状态：${status(ctx)}")
                     }
                 } catch (t: Throwable) {

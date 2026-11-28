@@ -33,6 +33,9 @@ object PatchWizardPage {
         val primary: Button,
         val secondaryBox: LinearLayout
     ) {
+        var probing = false
+        var announceResult = false
+        var dialog: AlertDialog? = null
         var busy = false
         var lastMessage = ""
     }
@@ -64,12 +67,12 @@ object PatchWizardPage {
         root.addView(secondaryBox)
 
         val holder = Holder(act, summary, primary, secondaryBox)
-        holders[act] = holder
+        holders.put(act, holder)?.dialog?.dismiss()
         refresh(act, announce = false)
     }
 
     fun detach(act: SettingsActivity) {
-        holders.remove(act)
+        holders.remove(act)?.dialog?.dismiss()
         DoubaoInstaller.detach(act)
     }
 
@@ -83,10 +86,37 @@ object PatchWizardPage {
         val h = holders[act] ?: return
         if (h.busy) return
 
-        val st = ApkPatcher.inspect(act)
-        val prepared = ApkPatcher.loadPrepared(act)
-        val canInstall = DoubaoInstaller.canInstall(act)
+        h.announceResult = h.announceResult || announce
+        if (h.probing) return
+        h.probing = true
+        h.primary.isEnabled = false
+        h.secondaryBox.removeAllViews()
+        val app = act.applicationContext
+        Thread {
+            val result = runCatching {
+                val st = ApkPatcher.inspect(app)
+                st to ApkPatcher.loadPrepared(app, st)
+            }
+            main.post {
+                if (!live(h)) return@post
+                h.probing = false
+                val speak = h.announceResult
+                h.announceResult = false
+                result.onSuccess { (st, prepared) -> render(h, st, prepared, speak) }
+                    .onFailure {
+                        setSummary(h, "检测失败：${it.message}", speak)
+                        h.primary.isEnabled = true
+                        setPrimary(h, "重新检测") { refresh(act, true) }
+                    }
+            }
+        }.start()
+    }
 
+    private fun live(h: Holder) = !h.act.isFinishing && !h.act.isDestroyed && holders[h.act] === h
+
+    private fun render(h: Holder, st: ApkPatcher.DoubaoStatus, prepared: ApkPatcher.PreparedOutput?, announce: Boolean) {
+        val act = h.act
+        val canInstall = DoubaoInstaller.canInstall(act)
         h.secondaryBox.removeAllViews()
         h.primary.isEnabled = true
 
@@ -115,20 +145,18 @@ object PatchWizardPage {
                 setPrimary(h, "安装修补版豆包输入法") {
                     startInstall(h, prepared, forceSession = false)
                 }
-                if (prepared.splitApks.isEmpty()) {
+                if (prepared.singleApk) {
                     addSecondary(h, "换用系统会话模式安装（备用）") {
                         startInstall(h, prepared, forceSession = true)
                     }
                 }
-                addSecondary(h, "导出修补安装包到文件夹（安装失败时备用）") {
-                    exportPreparedToFolder(h, prepared)
-                }
+                addExport(h, prepared)
                 addSecondary(h, "复制安装修补日志") {
                     act.toast(PatchLog.copyToClipboard(act))
                 }
                 addSecondary(h, "刷新状态") { refresh(act, announce = true) }
                 addSecondary(h, "放弃并清理缓存的修补包") {
-                    ApkPatcher.clearPrepared(act)
+                    ApkPatcher.clearPrepared(act, prepared)
                     refresh(act, announce = true)
                 }
             }
@@ -169,14 +197,26 @@ object PatchWizardPage {
                     announce
                 )
                 setPrimary(h, "卸载原版豆包输入法") {
-                    DoubaoInstaller.requestUninstallDoubao(act)
+                    val app = act.applicationContext
+                    h.primary.isEnabled = false
+                    Thread {
+                        val verified = runCatching {
+                            val current = ApkPatcher.inspect(app)
+                            current.kind == ApkPatcher.PatchKind.ORIGINAL &&
+                                ApkPatcher.loadPrepared(app, current)?.dir == prepared.dir
+                        }.getOrDefault(false)
+                        main.post {
+                            if (!live(h)) return@post
+                            if (verified && runCatching { ApkPatcher.confirmUninstall(prepared) }.isSuccess) {
+                                DoubaoInstaller.requestUninstallDoubao(act)
+                            }
+                            refresh(act, true)
+                        }
+                    }.start()
                 }
-                addSecondary(h, "导出修补安装包到文件夹（备用）") {
-                    exportPreparedToFolder(h, prepared)
-                }
+                addExport(h, prepared)
                 addSecondary(h, "我已卸载，刷新状态") { refresh(act, announce = true) }
                 addSecondary(h, "重新生成修补包") {
-                    ApkPatcher.clearPrepared(act)
                     confirmAndPatch(h, st, autoInstallAfter = false)
                 }
             }
@@ -216,19 +256,16 @@ object PatchWizardPage {
                         setPrimary(h, "覆盖安装新版豆包输入法") {
                             startInstall(h, preparedHot, forceSession = false)
                         }
-                        if (preparedHot.splitApks.isEmpty()) {
+                        if (preparedHot.singleApk) {
                             addSecondary(h, "换用系统会话模式安装（备用）") {
                                 startInstall(h, preparedHot, forceSession = true)
                             }
                         }
-                        addSecondary(h, "导出修补安装包到文件夹（安装失败时备用）") {
-                            exportPreparedToFolder(h, preparedHot)
-                        }
+                        addExport(h, preparedHot)
                         addSecondary(h, "复制安装修补日志") {
                             act.toast(PatchLog.copyToClipboard(act))
                         }
                         addSecondary(h, "重新生成覆盖包") {
-                            ApkPatcher.clearPrepared(act)
                             confirmAndPatch(h, st, autoInstallAfter = true)
                         }
                     } else {
@@ -244,7 +281,7 @@ object PatchWizardPage {
                     }
                     addSecondary(h, "刷新状态") { refresh(act, announce = true) }
                 } else {
-                    if (prepared != null) ApkPatcher.clearPrepared(act)
+                    if (prepared != null) ApkPatcher.clearPrepared(act, prepared)
                     setSummary(
                         h,
                         "配置完成：豆包输入法（${st.versionName}）已嵌入最新版无障碍模块（${ConfigSpec.MODULE_VERSION_NAME}）。\n\n" +
@@ -270,7 +307,7 @@ object PatchWizardPage {
 
     private fun confirmAndPatch(h: Holder, st: ApkPatcher.DoubaoStatus, autoInstallAfter: Boolean) {
         if (!st.supported) {
-            AlertDialog.Builder(h.act)
+            h.dialog = AlertDialog.Builder(h.act)
                 .setTitle("豆包版本未在适配列表中")
                 .setMessage(
                     "当前豆包输入法版本是 ${st.versionName}，本模块已验证的版本为 ${ConfigSpec.SUPPORTED_NAMES}。" +
@@ -293,9 +330,9 @@ object PatchWizardPage {
 
         Thread {
             try {
-                val prepared = ApkPatcher.patchDoubao(h.act) { msg ->
+                val prepared = ApkPatcher.patchDoubao(h.act.applicationContext) { msg ->
                     main.post {
-                        if (!h.act.isFinishing) {
+                        if (live(h)) {
                             h.primary.text = msg
                             h.summary.text = "正在处理：$msg"
                         }
@@ -303,7 +340,7 @@ object PatchWizardPage {
                 }
                 main.post {
                     h.busy = false
-                    if (h.act.isFinishing) return@post
+                    if (!live(h)) return@post
                     if (autoInstallAfter) {
                         setSummary(h, "同步包已生成，正在打开系统安装确认界面…", announce = true)
                         startInstall(h, prepared)
@@ -314,9 +351,9 @@ object PatchWizardPage {
             } catch (t: Throwable) {
                 main.post {
                     h.busy = false
-                    if (h.act.isFinishing) return@post
+                    if (!live(h)) return@post
                     val detail = t.message ?: t.javaClass.simpleName
-                    AlertDialog.Builder(h.act)
+                    h.dialog = AlertDialog.Builder(h.act)
                         .setTitle("修补失败")
                         .setMessage("生成修补包时出错：$detail")
                         .setPositiveButton("确定", null)
@@ -338,22 +375,20 @@ object PatchWizardPage {
         setSummary(h, "正在提交安装包给系统安装器，请稍候…", announce = true)
 
         DoubaoInstaller.installPrepared(h.act, prepared, forceSession = forceSession) { done, ok, msg ->
-            if (h.act.isFinishing) return@installPrepared
+            if (!live(h)) return@installPrepared
             if (!done) {
                 // 系统安装界面已打开：解除 busy，安装完成返回本页时 onResume 可自动刷新状态
                 h.busy = false
                 h.primary.isEnabled = true
                 h.primary.text = if (forceSession) "重新用会话模式安装" else "重新打开系统安装界面"
                 if (h.secondaryBox.childCount == 0) {
-                    if (!forceSession && prepared.splitApks.isEmpty()) {
+                    if (!forceSession && prepared.singleApk) {
                         addSecondary(h, "换用系统会话模式安装（备用）") {
                             startInstall(h, prepared, forceSession = true)
                         }
                     }
-                    if (prepared.splitApks.isEmpty()) {
-                        addSecondary(h, "导出修补安装包到文件夹（安装失败时备用）") {
-                            exportPreparedToFolder(h, prepared)
-                        }
+                    if (prepared.singleApk) {
+                        addExport(h, prepared)
                     }
                     addSecondary(h, "复制安装修补日志") {
                         h.act.toast(PatchLog.copyToClipboard(h.act))
@@ -375,21 +410,27 @@ object PatchWizardPage {
                     .setNeutralButton("复制错误日志") { _, _ ->
                         h.act.toast(PatchLog.copyToClipboard(h.act))
                     }
-                if (prepared.splitApks.isEmpty()) {
+                if (prepared.singleApk) {
                     dlg.setNegativeButton("导出安装包手动安装") { _, _ ->
                         exportPreparedToFolder(h, prepared)
                     }
                 }
-                dlg.show()
+                h.dialog = dlg.show()
                 refresh(h.act, announce = true)
             }
         }
     }
 
+    private fun addExport(h: Holder, prepared: ApkPatcher.PreparedOutput) {
+        if (prepared.singleApk) addSecondary(h, "导出修补安装包到文件夹（备用）") {
+            exportPreparedToFolder(h, prepared)
+        } else h.secondaryBox.addView(h.act.note("豆包包含分包，必须使用系统会话安装，单独导出主包无法完整安装。"))
+    }
+
     private fun exportPreparedToFolder(h: Holder, prepared: ApkPatcher.PreparedOutput) {
         if (h.busy) return
         AppStorage.ensurePermission(h.act) {
-            if (h.busy || h.act.isFinishing) return@ensurePermission
+            if (h.busy || !live(h)) return@ensurePermission
             h.busy = true
             h.primary.isEnabled = false
             setSummary(h, "正在导出修补安装包到手机存储，请稍候…", announce = true)
@@ -399,8 +440,8 @@ object PatchWizardPage {
                     val shownPath = AppStorage.displayPath(out)
                     main.post {
                         h.busy = false
-                        if (h.act.isFinishing) return@post
-                        AlertDialog.Builder(h.act)
+                        if (!live(h)) return@post
+                        h.dialog = AlertDialog.Builder(h.act)
                             .setTitle("修补安装包已导出")
                             .setMessage("已保存到：$shownPath\n\n如果刚才无法直接跳转安装，可打开手机“文件管理”找到此安装包点击安装。")
                             .setPositiveButton("知道了", null)
@@ -411,7 +452,7 @@ object PatchWizardPage {
                     PatchLog.e(h.act, "导出修补安装包失败", t)
                     main.post {
                         h.busy = false
-                        if (h.act.isFinishing) return@post
+                        if (!live(h)) return@post
                         h.act.toast("导出失败：${t.message ?: t.javaClass.simpleName}")
                         refresh(h.act, announce = true)
                     }
