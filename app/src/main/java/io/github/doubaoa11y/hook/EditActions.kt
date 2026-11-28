@@ -27,6 +27,7 @@ object EditActions {
     /** 是否在选择模式（多选）里：进入后方向动作变成扩展选择 */
     @Volatile
     private var selecting = false
+    private var selectionGeneration = 0L
 
     /** 选择模式的起点（绝对偏移），-1 表示还没开始选 */
     private var anchor = -1
@@ -153,7 +154,15 @@ object EditActions {
      * 2. 把已排队的动作播报从兜底超时切换为短落地缓冲，避开与 8192/16 竞态打断；
      * 3. 发现选区被外部清空时及时退出选择态。
      */
+    /** 选区与光标实时缓存（由 onUpdateSelection 与自身 setSelection 同步，用于快速单步移光标免拷全文） */
+    @Volatile
+    private var lastSelStart = -1
+    @Volatile
+    private var lastSelEnd = -1
+
     fun onUpdateSelection(oldStart: Int, oldEnd: Int, newStart: Int, newEnd: Int) {
+        lastSelStart = newStart
+        lastSelEnd = newEnd
         if (!FullscreenMode.active && !selecting && pendingSpeech == null && pendingExtend == null) return
         try {
             val now = SystemClock.uptimeMillis()
@@ -214,14 +223,7 @@ object EditActions {
      */
     fun onExternalDelete() {
         if (!selecting) return
-        main.postDelayed({
-            val ic = ic() ?: return@postDelayed
-            val s = snapshot(ic)
-            // 编辑框里已经没有选中文本了（被删掉或收成光标），退出选择态
-            if (s == null || !s.hasSelection) {
-                clearSelectionState("删除键删掉选中文本")
-            }
-        }, 120)
+        checkSelectionAfterDelete(120, clearWithoutConnection = false, reason = "删除键删掉选中文本")
     }
 
     /**
@@ -237,13 +239,17 @@ object EditActions {
             EditOptions.keyTyped()
             return
         }
+        checkSelectionAfterDelete(150, clearWithoutConnection = true, reason = "键盘删除键删掉选中文本")
+    }
+
+    private fun checkSelectionAfterDelete(delayMs: Long, clearWithoutConnection: Boolean, reason: String) {
+        val generation = selectionGeneration
         main.postDelayed({
-            val ic = ic()
-            val s = ic?.let { snapshot(it) }
-            if (s == null || !s.hasSelection) {
-                clearSelectionState("键盘删除键删掉选中文本")
-            }
-        }, 150)
+            if (generation != selectionGeneration || !selecting) return@postDelayed
+            val connection = ic()
+            if (connection == null && !clearWithoutConnection) return@postDelayed
+            if (connection?.let { snapshot(it) }?.hasSelection != true) clearSelectionState(reason)
+        }, delayMs)
     }
 
     /**
@@ -263,6 +269,7 @@ object EditActions {
      * 和“活动端留着旧偏移、下次进来直接乱扩选”这两种残留。
      */
     private fun clearSelectionState(reason: String) {
+        selectionGeneration++
         cancelPendingExtend()
         selectGuardUntil = 0L
         if (!selecting && anchor < 0 && activeEnd < 0) return
@@ -305,6 +312,7 @@ object EditActions {
      * 这里照做——想接着选，展开后重新执行“选择文本”就行，成本很低。
      */
     fun onWindowHidden() {
+        selectionGeneration++
         resetEcho()
         if (!selecting) return
         val ic = ic()
@@ -313,7 +321,7 @@ object EditActions {
         val end = activeEnd
         clearSelectionState("键盘收起，收起前有选中=$hasSel")
         // 收起前编辑框还留着选区：顺手收成光标，不然重新展开又是一片蓝色高亮（用户反馈）
-        if (hasSel && ic != null) collapseSelection(ic, end, "键盘收起")
+        if (hasSel) collapseSelection(ic, end, "键盘收起")
     }
 
     /**
@@ -333,9 +341,6 @@ object EditActions {
         }
     }
 
-    private val stops = charArrayOf('。', '！', '？', '；', '…', '\n', '．', '.', '!', '?', ';')
-    @Suppress("unused") private val unusedStops = stops  // 保留给未来句子边界兜底参考
-
     // ---------------- 天坦式光标移动 ----------------
     //
     // 移动光标完全照搬天坦输入法的 GranularityIterator 思路：不用方向键（方向键会被豆包编辑框
@@ -344,8 +349,20 @@ object EditActions {
     // setSelection 直接把光标移过去，最后读越过的那段字。这样操作的是 InputConnection 的选区，
     // 与读屏、豆包原生编辑面板各走各的，天然不冲突、不错位。
 
-    /** 默认的“句子结束”标点，和天坦输入法 SENTENCE_SYMBOL_DEFAULT 一致 */
-    private fun sentenceSymbols() = ConfigSpec.sentenceList(Config.s("sentenceSymbols")).toSet()
+    /** 默认的“句子结束”标点，和天坦输入法 SENTENCE_SYMBOL_DEFAULT 一致（按配置原串缓存，避免逐字扫描反复建集合） */
+    @Volatile
+    private var cachedSentenceRaw: String? = null
+    @Volatile
+    private var cachedSentenceSet: Set<String> = emptySet()
+
+    private fun sentenceSymbols(): Set<String> {
+        val raw = Config.s("sentenceSymbols")
+        if (raw == cachedSentenceRaw) return cachedSentenceSet
+        val parsed = ConfigSpec.sentenceList(raw).toSet()
+        cachedSentenceRaw = raw
+        cachedSentenceSet = parsed
+        return parsed
+    }
 
     private fun isSentenceSymbol(c: Char): Boolean = sentenceSymbols().contains(c.toString())
 
@@ -355,45 +372,55 @@ object EditActions {
         null
     }
 
-    /**
-     * 编辑框里现在一个字都没有。
-     *
-     * 给编辑菜单用（空框只显示“粘贴”“收起键盘”）。这是跨进程问编辑框，别在每次按键里调，
-     * 只在弹键盘、上屏、删除、粘贴这些节点调（见 [EditOptions.refresh]）。
-     */
-    fun editorEmpty(): Boolean {
-        val c = ic() ?: return true
+    /** null 表示编辑器没有提供足够的信息。 */
+    internal fun editorEmpty(): EditorMenuState {
+        val c = ic() ?: return EditorMenuState()
         return try {
+            val info = ViewA11yHooks.service?.currentInputEditorInfo
+            val canSend = info != null && (info.actionId != 0 ||
+                (info.imeOptions and EditorInfo.IME_MASK_ACTION) in setOf(
+                    EditorInfo.IME_ACTION_SEND, EditorInfo.IME_ACTION_GO,
+                    EditorInfo.IME_ACTION_DONE, EditorInfo.IME_ACTION_SEARCH))
+            if (!InputPrivacy.mayRead()) return EditorMenuState(canSend = canSend)
+            val selected = c.getSelectedText(0)
+            if (!selected.isNullOrEmpty()) {
+                return EditorMenuState(empty = false, selected = true, canSend = canSend)
+            }
             val before = c.getTextBeforeCursor(1, 0)
+            if (!before.isNullOrEmpty()) {
+                return EditorMenuState(empty = false, selected = false, canSend = canSend)
+            }
             val after = c.getTextAfterCursor(1, 0)
-            val sel = c.getSelectedText(0)
-            before.isNullOrEmpty() && after.isNullOrEmpty() && sel.isNullOrEmpty()
+            val empty = when {
+                !after.isNullOrEmpty() -> false
+                before != null && after != null -> true
+                else -> null
+            }
+            EditorMenuState(empty, if (empty == null && selected == null) null else false, canSend)
         } catch (t: Throwable) {
             L.hookError("EditActions.editorEmpty", t)
-            true
+            EditorMenuState()
         }
     }
 
     /** 整段文字、组字区起点、光标 */
-    private class Snapshot(val text: String, val offset: Int, val start: Int, val end: Int) {
+    private class Snapshot(val text: String, val offset: Int, val start: Int, val end: Int, val complete: Boolean) {
         val caret: Int get() = if (start == end) start else minOf(start, end)
         val hasSelection: Boolean get() = start != end
         fun indexOf(i: Int): Int = (i - offset).coerceIn(0, text.length)
     }
 
-    private fun snapshot(ic: InputConnection): Snapshot? { return try {
-        val type = ViewA11yHooks.service?.currentInputEditorInfo?.inputType ?: 0
-        val variation = type and android.text.InputType.TYPE_MASK_VARIATION
-        val cls = type and android.text.InputType.TYPE_MASK_CLASS
-        if ((cls == android.text.InputType.TYPE_CLASS_TEXT && variation in setOf(android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD, android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD, android.text.InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD)) ||
-            (cls == android.text.InputType.TYPE_CLASS_NUMBER && variation == android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD)) return null
-        val et: ExtractedText = ic.getExtractedText(ExtractedTextRequest(), 0) ?: return null
-        val t = et.text?.toString() ?: return null
-        Snapshot(t, et.startOffset, et.selectionStart + et.startOffset, et.selectionEnd + et.startOffset)
-    } catch (t: Throwable) {
+    private fun snapshot(ic: InputConnection): Snapshot? = try {
+        if (!InputPrivacy.mayRead()) null
+        else {
+            val et: ExtractedText? = ic.getExtractedText(ExtractedTextRequest(), 0)
+            val t = et?.text?.toString()
+            if (et == null || t == null) null
+            else Snapshot(t, et.startOffset, et.selectionStart + et.startOffset, et.selectionEnd + et.startOffset,
+                et.startOffset == 0 && et.partialStartOffset < 0)
+        }
+    } catch (_: Throwable) {
         null
-    }
-
     }
 
     // ---------------- 字 ----------------
@@ -426,8 +453,14 @@ object EditActions {
             }
             // 选择态已失效（残留）：往下走普通移动
         }
+        if (!selecting) {
+            when (tryFastStep(ic, dir)) {
+                FastStepResult.DONE, FastStepResult.REJECTED -> return
+                FastStepResult.FALLBACK -> {}
+            }
+        }
         val s = cached ?: snapshot(ic) ?: run {
-            // 拿不到文本快照（罕见）：退回方向键兜底，至少光标能动
+            // 拿不到文本快照（罕见或密码框）：退回方向键兜底，至少光标能动
             send(if (dir < 0) KeyEvent.KEYCODE_DPAD_LEFT else KeyEvent.KEYCODE_DPAD_RIGHT)
             return
         }
@@ -439,7 +472,14 @@ object EditActions {
             return
         }
         // setSelection 直接移动光标（选区收缩成一点）
-        ic.setSelection(s.offset + target, s.offset + target)
+        val absTarget = s.offset + target
+        if (!ic.setSelection(absTarget, absTarget)) {
+            lastSelStart = -1
+            lastSelEnd = -1
+            return
+        }
+        lastSelStart = absTarget
+        lastSelEnd = absTarget
         // 光标一动，应用自己会发“选区变了”，读屏立刻把那个字念出来；
         // 走语音库播报时先把读屏压一下，免得同一个字念两遍
         Speaker.hushReader()
@@ -448,18 +488,84 @@ object EditActions {
         speakCharMove(seg)
     }
 
+    private enum class FastStepResult { DONE, FALLBACK, REJECTED }
+
+    /**
+     * 快速按字移动路径：仅通过 getTextBeforeCursor/getTextAfterCursor 局部读取最多 16 个字符，
+     * 避免每次左右滑都通过 getExtractedText 跨进程拷贝整个编辑框全文。
+     * 区分三种结果：
+     * - DONE：已成功移动并触发播报；
+     * - REJECTED：已尝试移动但宿主拒绝 setSelection，清缓存且不回退慢路径（避免移动两次）；
+     * - FALLBACK：尚未尝试移动（隐私禁止/边界/窗口截断/缓存不一致），交由慢路径处理。
+     */
+    private fun tryFastStep(ic: InputConnection, dir: Int): FastStepResult {
+        if (!InputPrivacy.mayRead()) return FastStepResult.FALLBACK
+        val pos = lastSelStart
+        if (pos < 0 || pos != lastSelEnd) return FastStepResult.FALLBACK
+        val window = 16
+        return try {
+            val before = ic.getTextBeforeCursor(window, 0)?.toString() ?: return FastStepResult.FALLBACK
+            // 一致性校验：若光标前不足 window 字，其长度必须与缓存绝对偏移一致，否则回退全量快照
+            if (before.length < window && before.length != pos) return FastStepResult.FALLBACK
+            if (dir < 0) {
+                if (before.isEmpty()) return FastStepResult.FALLBACK // 到开头边界，走完整 snapshot 播报边界文案
+                val prev = TextBoundaries.step(before, before.length, -1)
+                if (prev < 0 || prev >= before.length) return FastStepResult.FALLBACK
+                val stepLen = before.length - prev
+                val newPos = pos - stepLen
+                if (newPos < 0) return FastStepResult.FALLBACK
+                // 如果恰好退到 16 字窗口起点但绝对位置 > 0，无法确定光标前一个完整字，回退全量快照
+                if (prev == 0 && newPos > 0) return FastStepResult.FALLBACK
+                if (!ic.setSelection(newPos, newPos)) {
+                    lastSelStart = -1
+                    lastSelEnd = -1
+                    return FastStepResult.REJECTED
+                }
+                lastSelStart = newPos
+                lastSelEnd = newPos
+                Speaker.hushReader()
+                val seg = if (newPos <= 0) CaretChar("已到开头", null, atStart = true)
+                else charBeforeCaret(before, prev)
+                speakCharMove(seg)
+                FastStepResult.DONE
+            } else {
+                val after = ic.getTextAfterCursor(window, 0)?.toString() ?: return FastStepResult.FALLBACK
+                if (after.isEmpty()) return FastStepResult.FALLBACK // 到结尾边界，走完整 snapshot 播报边界文案
+                val next = TextBoundaries.step(after, 0, 1)
+                if (next <= 0 || next > after.length) return FastStepResult.FALLBACK
+                // 若 16 个 UTF-16 单元恰好耗尽，无法确认末端是否截断了超长字素簇，回退全量快照
+                if (after.length == window && next >= after.length) return FastStepResult.FALLBACK
+                val newPos = pos + next
+                if (!ic.setSelection(newPos, newPos)) {
+                    lastSelStart = -1
+                    lastSelEnd = -1
+                    return FastStepResult.REJECTED
+                }
+                lastSelStart = newPos
+                lastSelEnd = newPos
+                Speaker.hushReader()
+                val unit = after.substring(0, next)
+                val explain = cursorExplanation(unit, Config.b("fsCursorExplainWord"), Config.b("fsCursorExplainLetter"))
+                val full = if (explain != null) "${spokenUnit(unit)}，$explain" else spokenUnit(unit)
+                speakCharMove(CaretChar(full, explain, atStart = false))
+                FastStepResult.DONE
+            }
+        } catch (_: Throwable) {
+            FastStepResult.FALLBACK
+        }
+    }
+
     private data class CaretChar(
         val full: String,
         val explainOnly: String?,
         val atStart: Boolean,
     )
 
-    /** 上一次朗读过的字在文本里的位置（-1 = 还没念过） */
-    private var lastCharIdx = -1
-
-    /** 换输入框、收起键盘时清掉，免得下一个输入框拿旧的序号去比 */
+    /** 换输入框、收起键盘时清掉，避免上一轮朗读或选区任务串到新输入框 */
     fun resetEcho() {
-        lastCharIdx = -1
+        lastSelStart = -1
+        lastSelEnd = -1
+        lastCharEchoAt = 0L
         rapidMove.reset()
         pendingEcho = ""
         main.removeCallbacks(burstRunner)
@@ -481,25 +587,39 @@ object EditActions {
         if (len == 0) return CaretChar("编辑框为空", null, atStart = true)
         val p = target.coerceIn(0, len)
         if (p <= 0) {
-            lastCharIdx = -1
             return CaretChar("已到开头", null, atStart = true)
         }
-        val bi = BreakIterator.getCharacterInstance(Locale.getDefault())
-        bi.setText(text)
-        val prev = bi.preceding(p).let { if (it == BreakIterator.DONE || it < 0) (p - 1).coerceAtLeast(0) else it }
-        lastCharIdx = prev
+        val prev = TextBoundaries.step(text, p, -1)
         val unit = text.substring(prev, p)
-        if (unit.length == 1) {
+        val explain = cursorExplanation(unit, Config.b("fsCursorExplainWord"), Config.b("fsCursorExplainLetter"))
+        val full = if (explain != null) "${spokenUnit(unit)}，$explain" else spokenUnit(unit)
+        return CaretChar(full, explain, atStart = false)
+    }
+
+    internal fun cursorExplanation(unit: String, explainWord: Boolean, explainLetter: Boolean): String? {
+        if (explainLetter && unit.length == 1) {
             val ch = unit[0]
-            val explain = CharWords.explainOnly(ch)
-            val full = if (explain != null) "$ch，$explain" else spoken(ch)
-            return CaretChar(full, explain, atStart = false)
+            if (ch in 'A'..'Z' || ch in 'a'..'z') {
+                val index = (ch.uppercaseChar() - 'A') + 1
+                return "第${index}个英文字母"
+            }
         }
-        return CaretChar(Names.spoken(unit), null, atStart = false)
+        if (explainWord) {
+            return CharWords.explainOnly(unit)
+        }
+        return null
+    }
+
+    internal fun formatBoundarySpeech(mode: Int, whole: String, count: Int): String = when (mode) {
+        0 -> if (whole.isEmpty()) "共${count}个字" else "共${count}个字，${whole}"
+        2 -> "共${count}个字"
+        3 -> whole.ifEmpty { "编辑框为空" }
+        else -> if (whole.isEmpty()) "共${count}个字" else "${whole}，共${count}个字"
     }
 
     /** 还没读出去的那一个字；快速连滑时被后来的覆盖，只留最后停留的那个 */
     private var pendingEcho = ""
+    private var lastCharEchoAt = 0L
 
     private val echoRunner = Runnable {
         val t = pendingEcho
@@ -509,7 +629,7 @@ object EditActions {
 
     /**
      * 移动光标后的单字朗读：
-     * - 独立 TTS / 天坦全屏屏蔽：读屏不念 8192，模块完整念“好，好坏的好”（90ms 防抖合并，无双读）；
+     * - 独立 TTS / 天坦全屏屏蔽：读屏不念 8192，模块完整念“好，好坏的好”（首步 0ms 立即播报，120ms 内连滑 50ms 合并）；
      * - 其他读屏（解说/保益/点明/TalkBack）走读屏播报时：
      *   1. 移到全文最开头（atStart）：读屏静默，由模块补报“已到开头”；
      *   2. 极速连滑（<=150ms）：读屏会因去抖/位差 >1 静默，停手 180ms 后由模块完整补念“好，好坏的好”；
@@ -519,7 +639,10 @@ object EditActions {
     private fun speakCharMove(info: CaretChar) {
         if (!Config.b("fsSpeakChar") || info.full.isEmpty()) return
         if (!Speaker.readerWillSpeak()) {
-            if (info.atStart) {
+            val now = SystemClock.uptimeMillis()
+            val rapid = lastCharEchoAt > 0L && now - lastCharEchoAt <= 120L
+            lastCharEchoAt = now
+            if (info.atStart || !rapid) {
                 main.removeCallbacks(echoRunner)
                 pendingEcho = ""
                 Speaker.speak(info.full)
@@ -527,7 +650,7 @@ object EditActions {
             }
             pendingEcho = info.full
             main.removeCallbacks(echoRunner)
-            main.postDelayed(echoRunner, 90)
+            main.postDelayed(echoRunner, 50)
             return
         }
         main.removeCallbacks(echoRunner)
@@ -540,38 +663,23 @@ object EditActions {
             scheduleAfterSelection(info.full, isEcho = true, afterSelMs = d, fallbackMs = SelectionOverrideTiming.fallbackMs(d))
             return
         }
+        val explain = info.explainOnly
+        // 关闭字词/字母解释（或解说读屏下当前字无需解释）时，不启动停手补念，彻底零延迟交给读屏原生播报
+        if (explain == null && (!Config.b("fsCursorExplainWord") && !Config.b("fsCursorExplainLetter") ||
+                A11yState.readerPackage == "com.nirenr.talkman")) {
+            main.removeCallbacks(burstRunner)
+            rapidMove.reset()
+            return
+        }
         val now = SystemClock.uptimeMillis()
         main.removeCallbacks(burstRunner)
         if (rapidMove.record(now, info.full)) {
-            main.postDelayed(burstRunner, 180L)
+            main.postDelayed(burstRunner, 95L)
             return
         }
-        val explain = info.explainOnly ?: return
-        val delay = if (A11yState.readerPackage == "com.nirenr.talkman" || A11yState.readerPackage.isEmpty()) 260L else 190L
-        scheduleAfterSelection(explain, isEcho = true, afterSelMs = delay, fallbackMs = delay + 90L)
-    }
-
-    /**
-     * 读一段越过的字：单个标点/空白/换行读名字，多个字符全文朗读（不截断）。
-     * 关掉“移动光标时朗读字词”后不读，交给读屏决定。
-     */
-    private fun speakSegment(seg: String, force: Boolean = false) {
-        if (!Config.b("fsSpeakChar")) return
-        if (!force && Speaker.readerWillSpeak()) {
-            noteBurst(seg)
-            return
-        }
-        val t = seg.trim()
-        val text = if (t.isEmpty()) spoken(seg.firstOrNull()) else t
-        if (force) {
-            main.removeCallbacks(echoRunner)
-            pendingEcho = ""
-            scheduleAfterSelection(text)
-            return
-        }
-        pendingEcho = text
-        main.removeCallbacks(echoRunner)
-        main.postDelayed(echoRunner, 90)
+        if (explain == null) return
+        val delay = if (A11yState.readerPackage == "com.nirenr.talkman" || A11yState.readerPackage.isEmpty()) 130L else 110L
+        scheduleAfterSelection(explain, isEcho = true, afterSelMs = delay, fallbackMs = delay + 50L)
     }
 
     // ---------------- 极速连滑漏读兜底 ----------------
@@ -586,19 +694,6 @@ object EditActions {
         }
     }
 
-    /**
-     * 记一次“读屏会自己念、模块先不念”的移动：
-     * - 正常节奏逐字滑动（相邻间隔 >150ms）：读屏每次 8192 都会稳定朗读，模块绝不插话；
-     * - 极速连滑（相邻间隔 <=150ms，落入读屏 100ms 去抖窗口导致位差 >1 被静默吞掉）：
-     *   停手 180ms 后只补念最后一格，避免用户什么都听不到。
-     */
-    private fun noteBurst(seg: String) {
-        val now = SystemClock.uptimeMillis()
-        main.removeCallbacks(burstRunner)
-        if (rapidMove.record(now, seg)) {
-            main.postDelayed(burstRunner, 180L)
-        }
-    }
 
     /**
      * 光标已经到了开头/结尾还继续滑：先完整念一遍正文，再报“共N个字”。
@@ -607,16 +702,21 @@ object EditActions {
     private fun speakBoundary(dir: Int, s: Snapshot) {
         Sound.play("boundary")
         val text = s.text
-        val n = text.length
+        if (!s.complete) {
+            Speaker.speak("已到当前文本片段边界")
+            return
+        }
+        val n = TextBoundaries.count(text)
         if (n == 0) {
             Speaker.speak("编辑框为空")
             return
         }
         val whole = text.replace("\r\n", "").replace('\n', '，').trim()
         Speaker.unmute()
-        val msg = if (whole.isEmpty()) "共${n}个字" else "${whole}，共${n}个字"
+        val mode = Config.i("fsBoundarySpeakMode")
+        val msg = formatBoundarySpeech(mode, whole, n)
         Speaker.echo(msg)
-        L.i("光标到边界：${if (dir < 0) "开头" else "结尾"}（全文+字数），共 $n 个字")
+        L.i("光标到边界：${if (dir < 0) "开头" else "结尾"}（模式=$mode），共 $n 个字")
     }
 
     /** 光标所在的那一句 / 那一段（按用户配置的标点断句） */
@@ -637,28 +737,6 @@ object EditActions {
         while (b < len && !isSentenceSymbol(text[b])) b++
         if (b < len) b++
         return text.substring(a, b).replace('\n', '，').trim()
-    }
-
-    /** 读一次移动后越过的字；拿不到就静默（读屏自己会读） */
-    private fun speakCharAfterMove(ic: InputConnection, dir: Int) {
-        val t = try {
-            if (dir > 0) ic.getTextBeforeCursor(1, 0) else ic.getTextAfterCursor(1, 0)
-        } catch (e: Throwable) {
-            null
-        }
-        val c = t?.toString()
-        // 到边界（拿不到字）时：只有编辑框一个字都没有才提示，有字就静默
-        if (c.isNullOrEmpty()) {
-            val empty = try {
-                val s = snapshot(ic)
-                s == null || s.text.isEmpty()
-            } catch (e: Throwable) {
-                false
-            }
-            if (empty) Speaker.speak(if (dir < 0) "已到开头" else "已到结尾")
-            return
-        }
-        Speaker.speak(spoken(c.firstOrNull()))
     }
 
     /** 方向键带 Shift（选择模式下扩选用） */
@@ -726,6 +804,7 @@ object EditActions {
         Candidates.onCursorMove()
         val now = SystemClock.uptimeMillis()
         val hadSelection = s.hasSelection
+        selectionGeneration++
         selecting = true
         selectGuardUntil = now + 260L
         // 固定端 = 当前光标位置（绝对偏移）
@@ -747,6 +826,7 @@ object EditActions {
 
     /** 取消选择：退出选择模式，光标回到选择起点 */
     fun deselect() {
+        selectionGeneration++
         Candidates.onCursorMove()
         val a = anchor
         // 先把状态收干净：以前这里 `val ic = ic() ?: return` 会在拿不到输入连接时
@@ -777,6 +857,23 @@ object EditActions {
         }
     }
 
+    private inline fun <T> batch(ic: InputConnection, action: () -> T): T {
+        ic.beginBatchEdit()
+        return try {
+            action()
+        } finally {
+            ic.endBatchEdit()
+        }
+    }
+
+    private fun postEdit(ic: InputConnection, generation: Long, delay: Long, action: () -> kotlin.Unit) {
+        main.postDelayed({
+            if (generation == selectionGeneration && ic === this.ic()) {
+                try { action() } catch (t: Throwable) { L.hookError("EditActions.postEdit", t) }
+            }
+        }, delay)
+    }
+
     /**
      * 把编辑框里的选区收成一个光标。返回 true 表示真的收掉了（原来有选中）。
      *
@@ -791,29 +888,28 @@ object EditActions {
         val base = s.offset
         val lo = base + s.indexOf(minOf(s.start, s.end))
         val hi = base + s.indexOf(maxOf(s.start, s.end))
+        val generation = selectionGeneration
         val p = if (prefer in lo..hi) prefer else hi
         try {
             // 套一层 batchEdit：部分编辑框（Flutter、自绘输入框）不套 batch 就不认 setSelection 的选区变更
-            ic.beginBatchEdit()
-            ic.setSelection(p, p)
-            ic.endBatchEdit()
+            batch(ic) { ic.setSelection(p, p) }
         } catch (t: Throwable) {
             L.hookError("collapseSelection.setSelection", t)
         }
-        main.postDelayed({
+        postEdit(ic, generation, 90) {
             val a = snapshot(ic)
-            if (a != null && a.hasSelection) {
+            if (a != null && a.start == s.start && a.end == s.end && a.text == s.text) {
                 L.w("退出选择态后编辑框还有选区（$why），改用方向键收掉")
                 sendArrowCollapse(ic, a)
-                main.postDelayed({
+                postEdit(ic, generation, 130) {
                     if (snapshot(ic)?.hasSelection == true) {
                         L.w("编辑框不给改选区（$why），只能等它自己取消")
                     } else {
                         L.i("方向键收掉了选区（$why）")
                     }
-                }, 130)
+                }
             }
-        }, 90)
+        }
         return true
     }
 
@@ -1063,16 +1159,7 @@ object EditActions {
         val p = pos.coerceIn(0, len)
         if (len == 0) return -1
         when (unit) {
-            Unit.CHAR -> {
-                val bi = BreakIterator.getCharacterInstance(Locale.getDefault())
-                bi.setText(text)
-                if (dir > 0) {
-                    val n = bi.following(p)
-                    return if (n == BreakIterator.DONE || n > len) -1 else n
-                }
-                val n = bi.preceding(p)
-                return if (n == BreakIterator.DONE || n < 0) -1 else n
-            }
+            Unit.CHAR -> return TextBoundaries.step(text, p, dir)
             Unit.SENTENCE -> {
                 val symbols = sentenceSymbols()
                 fun symAt(i: Int) = i in 0 until len && symbols.contains(text[i].toString())
@@ -1153,6 +1240,8 @@ object EditActions {
         scheduleAfterSelection(msg, afterSelMs = d, fallbackMs = SelectionOverrideTiming.fallbackMs(d))
         return true
     }
+
+    private fun spokenUnit(unit: String) = if (unit.length == 1) spoken(unit[0]) else Names.spoken(unit)
 
     private fun spoken(c: Char?): String = when (c) {
         null, '\u0000' -> "空"
@@ -1474,12 +1563,8 @@ object EditActions {
         var end = bi.next()
         while (end != BreakIterator.DONE) {
             val unit = raw.substring(start, end)
-            val piece = if (unit.length == 1) {
-                val ch = unit[0]
-                CharWords.explainWithChar(ch, force = true) ?: spoken(ch)
-            } else {
-                Names.spoken(unit)
-            }
+            val explain = CharWords.explainOnly(unit, force = true)
+            val piece = if (explain != null) "$unit，$explain" else spokenUnit(unit)
             if (piece.isNotEmpty()) parts.add(piece)
             start = end
             end = bi.next()
@@ -1500,7 +1585,10 @@ object EditActions {
         val ic = ic() ?: return
         val s = snapshot(ic)
         if (s != null && deleteSelection(ic, s)) return
-        val before = charBefore()
+        val before = s?.let {
+            val p = it.indexOf(it.caret)
+            if (p <= 0) null else it.text.getOrNull(p - 1)
+        }
         if (s != null && s.text.isEmpty()) {
             Speaker.speak("编辑框为空")
             return
@@ -1521,7 +1609,10 @@ object EditActions {
     fun deleteRight() {
         val ic = ic() ?: return
         val s = snapshot(ic)
-        val after = charAfter()
+        val after = s?.let {
+            val p = it.indexOf(it.caret)
+            it.text.getOrNull(p)
+        }
         if (s != null && s.text.isEmpty()) {
             Speaker.speak("编辑框为空")
             return
@@ -1624,10 +1715,18 @@ object EditActions {
         }
         if (!deleted) {
             try {
-                ic.beginBatchEdit()
-                ic.setSelection(s.offset + lo, s.offset + hi)
-                ic.commitText("", 1)
-                ic.endBatchEdit()
+                val start = s.offset + lo
+                val end = s.offset + hi
+                val committed = batch(ic) {
+                    val selected = ic.setSelection(start, end) || snapshot(ic)?.let {
+                        minOf(it.start, it.end) == start && maxOf(it.start, it.end) == end
+                    } == true
+                    selected && ic.commitText("", 1)
+                }
+                if (!committed) {
+                    L.w("编辑框未确认删除（$reason）")
+                    return
+                }
             } catch (t: Throwable) {
                 L.hookError("EditActions.$reason", t)
                 return
@@ -1665,6 +1764,13 @@ object EditActions {
     /** 朗读选中的文字；没选中就读光标所在行 */
     fun readSelection() {
         val ic = ic() ?: return
+        if (!InputPrivacy.mayRead()) return
+        val sel = try { ic.getSelectedText(0)?.toString() } catch (_: Throwable) { null }
+        if (sel != null && sel.isNotEmpty()) {
+            val t = sel.trim()
+            if (t.isEmpty()) Speaker.speak("选中的是空白") else Speaker.speak("${t}，已选中")
+            return
+        }
         val s = snapshot(ic) ?: return
         if (!s.hasSelection) {
             readLine()
@@ -1701,37 +1807,38 @@ object EditActions {
             sendCtrlZ(ic)
         }
         clearSelectionState("撤销")
-        main.postDelayed({
+        val generation = selectionGeneration
+        postEdit(ic, generation, 70) {
             val after = snapshot(ic)?.text
             val changed = before != null && after != null && after != before
             if (changed) {
                 Speaker.speak("已撤销")
-                main.postDelayed({ readLine(quiet = true) }, 90)
-                main.postDelayed({ EditOptions.refresh("撤销") }, 140)
-                return@postDelayed
+                postEdit(ic, generation, 90) { readLine(quiet = true) }
+                postEdit(ic, generation, 140) { EditOptions.refresh("撤销") }
+                return@postEdit
             }
             if (ctxOk && before != null) {
                 // 部分编辑框 performContextMenuAction(undo) 返回 true 但未实际改动文本，补发一次 Ctrl+Z
                 sendCtrlZ(ic)
-                main.postDelayed({
+                postEdit(ic, generation, 70) {
                     val after2 = snapshot(ic)?.text
                     val changed2 = after2 != null && after2 != before
                     if (changed2) {
                         Speaker.speak("已撤销")
-                        main.postDelayed({ readLine(quiet = true) }, 90)
-                        main.postDelayed({ EditOptions.refresh("撤销") }, 140)
+                        postEdit(ic, generation, 90) { readLine(quiet = true) }
+                        postEdit(ic, generation, 140) { EditOptions.refresh("撤销") }
                     } else {
                         Speaker.speak("没有可撤销的内容")
                     }
-                }, 70)
+                }
             } else if (ctxOk || before == null) {
                 Speaker.speak("已撤销")
-                main.postDelayed({ readLine(quiet = true) }, 90)
-                main.postDelayed({ EditOptions.refresh("撤销") }, 140)
+                postEdit(ic, generation, 90) { readLine(quiet = true) }
+                postEdit(ic, generation, 140) { EditOptions.refresh("撤销") }
             } else {
                 Speaker.speak("这个输入框不支持撤销")
             }
-        }, 70)
+        }
     }
 
     /** 清空文本：全选再删，一次清干净 */
@@ -1746,7 +1853,9 @@ object EditActions {
         val n = s.text.length
         TypingEcho.suppressDeleteFor()
         ic.performContextMenuAction(android.R.id.selectAll)
-        ic.commitText("", 1)
+        TypingEcho.suppressingInput {
+            ic.commitText("", 1)
+        }
         speechGate.markSkipNext(SystemClock.uptimeMillis())
         val d = textChangeDelayMs()
         scheduleAfterSelection(GestureSpeechFormat.cleared(n), afterSelMs = d, fallbackMs = SelectionOverrideTiming.fallbackMs(d))
@@ -1758,17 +1867,21 @@ object EditActions {
     fun charCount() {
         val ic = ic() ?: return
         val s = snapshot(ic) ?: return
+        if (!s.complete) {
+            Speaker.speak("仅取得部分文本，无法统计全文")
+            return
+        }
         val t = s.text
         if (t.isEmpty()) {
             Speaker.speak("编辑框为空")
             return
         }
-        val noSpace = t.count { !it.isWhitespace() }
+        val total = TextBoundaries.count(t)
         if (s.hasSelection) {
-            val n = kotlin.math.abs(s.end - s.start)
-            Speaker.speak("选中 $n 个字，全文 ${t.length} 个字")
+            val n = TextBoundaries.selectedCount(t, s.indexOf(s.start), s.indexOf(s.end))
+            Speaker.speak("选中 $n 个字，全文 $total 个字")
         } else {
-            Speaker.speak("共 ${t.length} 个字，不含空格 $noSpace 个")
+            Speaker.speak("共 $total 个字，不含空格 ${TextBoundaries.count(t, skipWhitespace = true)} 个")
         }
     }
 
@@ -1810,6 +1923,7 @@ object EditActions {
     /** 全选：选中全部文字并进入选择态，之后左右滑可扩选/缩选、剪切复制删除 */
     fun selectAll() {
         val ic = ic() ?: return
+        selectionGeneration++
         val before = snapshot(ic)
         val now = SystemClock.uptimeMillis()
         // 先按“选上了”处理：校验要等一下才能做，用户这期间滑一下也是扩选，不会变成移动光标
@@ -1852,13 +1966,15 @@ object EditActions {
 
     fun copy() {
         val ic = ic() ?: return
-        val s = snapshot(ic)
-        val selected = s?.let {
-            if (!it.hasSelection) "" else it.text.substring(
-                it.indexOf(minOf(it.start, it.end)).coerceIn(0, it.text.length),
-                it.indexOf(maxOf(it.start, it.end)).coerceIn(0, it.text.length),
-            )
-        } ?: ""
+        val selected = if (InputPrivacy.mayRead()) {
+            try { ic.getSelectedText(0)?.toString() } catch (_: Throwable) { null }
+                ?: snapshot(ic)?.let {
+                    if (!it.hasSelection) "" else it.text.substring(
+                        it.indexOf(minOf(it.start, it.end)).coerceIn(0, it.text.length),
+                        it.indexOf(maxOf(it.start, it.end)).coerceIn(0, it.text.length),
+                    )
+                }.orEmpty()
+        } else ""
         val ok = try {
             ic.performContextMenuAction(android.R.id.copy)
         } catch (t: Throwable) {
@@ -1866,10 +1982,16 @@ object EditActions {
             false
         }
         speechGate.markSkipNext(SystemClock.uptimeMillis())
+        if (ok) {
+            finishSelection()
+            val label = plainLabel(selected)
+            Speaker.speak(GestureSpeechFormat.copied(label, selected.length))
+            return
+        }
         main.postDelayed({
-            // 复制成功与否不看返回值：有的编辑框返回 false 但已经复制好了，看剪贴板里是不是这段
+            // 有的编辑框 performContextMenuAction 返回 false 但已经复制好了，延时检查剪贴板兜底
             val clip = clipboardText()
-            val copied = ok || (selected.isNotEmpty() && clip != null && (clip == selected || clip.contains(selected.take(40))))
+            val copied = selected.isNotEmpty() && clip != null && (clip == selected || clip.contains(selected.take(40)))
             if (copied) finishSelection()
             val label = plainLabel(selected)
             Speaker.speak(
@@ -1880,7 +2002,6 @@ object EditActions {
                 }
             )
         }, 100)
-        if (ok) finishSelection()
     }
 
     fun cut() {
@@ -1981,7 +2102,7 @@ object EditActions {
             }
             Speaker.speak("当前编辑框不支持粘贴")
             L.w("粘贴没生效：编辑框文字没变化，返回值=$ok")
-        }, if (round == 0) 110L else 260L)
+        }, if (round == 0) 55L else 260L)
     }
 
     /** 剪贴板里现在是什么（只用来判断复制有没有成功，读不到就当没有） */

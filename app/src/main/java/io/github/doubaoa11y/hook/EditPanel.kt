@@ -75,19 +75,25 @@ object EditPanel {
         return true
     }
 
-    /** 从菜单里打开：先点菜单的返回键把菜单关掉，再打开面板 */
+    /** 从菜单里打开：先点菜单的返回键把菜单关掉，工具箱一隐藏就立刻打开面板（不再死等 350 ms） */
     fun closeToolboxThenOpen() {
         val root = ViewA11yHooks.service?.window?.window?.decorView ?: return
         val id = root.resources.getIdentifier("btn_toolbox_back", "id", root.context.packageName)
         val back = if (id != 0) root.findViewById<View>(id) else null
         back?.performClick()
-        root.postDelayed({
+        fun tryOpen(attempt: Int) {
             try {
-                open()
+                val toolbox = Panels.find(root)?.takeIf { it.javaClass.simpleName == "ToolboxKeyboardView" && it.isShown }
+                if (toolbox == null || attempt >= 7) {
+                    open()
+                } else {
+                    root.postDelayed({ tryOpen(attempt + 1) }, 50L)
+                }
             } catch (t: Throwable) {
                 L.hookError("EditPanel.open", t)
             }
-        }, 350)
+        }
+        root.post { tryOpen(0) }
     }
 
     private val buttons = ArrayList<View>()
@@ -219,6 +225,7 @@ object EditPanel {
     }
 
     private fun selection(ic: InputConnection): Triple<Int, Int, Int>? {
+        if (!InputPrivacy.mayRead()) return null
         val et = ic.getExtractedText(ExtractedTextRequest(), 0) ?: return null
         val len = et.text?.length ?: return null
         return Triple(et.selectionStart + et.startOffset, et.selectionEnd + et.startOffset, len + et.startOffset)
@@ -293,6 +300,7 @@ object EditPanel {
 
     /** 读光标刚越过的那个字 */
     private fun speakCharAt(ic: InputConnection, dir: Int) {
+        if (!InputPrivacy.mayRead()) return
         val t = if (dir < 0) ic.getTextAfterCursor(1, 0) else ic.getTextBeforeCursor(1, 0)
         val c = t?.toString() ?: return
         Speaker.speak(when (c) {
@@ -304,6 +312,7 @@ object EditPanel {
     }
 
     private fun speakRange(ic: InputConnection, a: Int, b: Int) {
+        if (!InputPrivacy.mayRead()) return
         val n = kotlin.math.abs(a - b)
         val sel = ic.getSelectedText(0)?.toString()
         Speaker.speak(if (sel.isNullOrEmpty()) "已选 $n 个字" else "已选 $sel")

@@ -36,8 +36,8 @@ object ServiceHooks {
                 ClipboardNav.onKeyboardShown()
                 val identity = "${ei?.packageName}/${ei?.fieldId}/${ei?.inputType}"
                 if (editorIdentity != identity || p.args[1] != true) {
+                    KeyboardOps.cancelOrganizeWatch()
                     Voice.onInputEnd()
-                    TypingEcho.reset()
                     Candidates.reset("换输入框")
                     editorIdentity = identity
                 }
@@ -47,20 +47,32 @@ object ServiceHooks {
         val integer = Int::class.javaPrimitiveType!!
         Hooker.method(c, "onUpdateSelection", Array(6) { integer }, SafeHook("candidate.selection", after = { p ->
             if (!A11yState.recording) return@SafeHook
-            val values = p.args.map { it as? Int ?: -1 }
-            if (values[0] != values[2] || values[1] != values[3])
-                Candidates.onExternalSelection(values[4] >= 0 && values[5] >= 0)
-            EditActions.onUpdateSelection(values[0], values[1], values[2], values[3])
+            val a = p.args
+            val oldSelStart = a[0] as? Int ?: -1
+            val oldSelEnd = a[1] as? Int ?: -1
+            val newSelStart = a[2] as? Int ?: -1
+            val newSelEnd = a[3] as? Int ?: -1
+            val candStart = a[4] as? Int ?: -1
+            val candEnd = a[5] as? Int ?: -1
+            if (oldSelStart != newSelStart || oldSelEnd != newSelEnd)
+                Candidates.onExternalSelection(candStart >= 0 && candEnd >= 0)
+            EditActions.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd)
+            if (KeyboardOps.isWatchingOrganize) KeyboardOps.onEditorTextMayHaveChanged()
         }))
         installHideHooks(cl)
         Hooker.method(c, "onComputeInsets", arrayOf(android.inputmethodservice.InputMethodService.Insets::class.java),
             SafeHook("fullscreen.insets", after = { p -> FullscreenMode.onComputeInsets(p.args[0]) }))
-        Hooker.method(c, "onDestroy", arrayOf(), SafeHook("fullscreen.destroy", before = { _ ->
-            FullscreenMode.shutdown()
-            ReaderControl.hidden()
-            TatansBridge.onHidden()
-            EditOptions.onKeyboardHidden()
-            Speaker.stop()
+        Hooker.method(c, "onDestroy", arrayOf(), SafeHook("fullscreen.destroy", before = { p ->
+            if (ViewA11yHooks.service !== p.thisObject) return@SafeHook
+            try {
+                FullscreenMode.shutdown()
+                ReaderControl.hidden()
+                TatansBridge.onHidden()
+                EditOptions.onKeyboardHidden()
+                Speaker.stop()
+            } finally {
+                if (ViewA11yHooks.service === p.thisObject) ViewA11yHooks.service = null
+            }
         }))
         Hooker.method(c, "onWindowShown", arrayOf(), SafeHook("onWindowShown", after = { _ ->
             cancelHide("onWindowShown")
@@ -212,6 +224,15 @@ object ServiceHooks {
         "豆包版本未知"
     }
 
+    private fun statusExtras(intent: Intent) = android.os.Bundle().apply {
+        val key = io.github.doubaoa11y.SettingsProvider.REQUEST_ID
+        if (intent.hasExtra(key)) putLong(key, intent.getLongExtra(key, -1))
+        putInt("moduleVersion", ConfigSpec.MODULE_VERSION_CODE)
+        putBoolean("active", VirtualKeys.enabled)
+        putBoolean("sync_upperOperation", Config.b("upperOperation"))
+        for (key in ConfigSpec.TOOLBAR_TOGGLE_KEYS) putBoolean("sync_$key", Config.b(key))
+    }
+
     private fun registerReceiver(ctx: Context) {
         val r = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
@@ -252,10 +273,29 @@ object ServiceHooks {
                         return
                     }
                     handle(intent)
+                    if (cmd == ConfigSpec.CMD_LOG_COPY) {
+                        val ordered = isOrderedBroadcast
+                        val extras = if (ordered) statusExtras(intent) else null
+                        val pending = goAsync()
+                        Thread({
+                            try {
+                                val message = LogStore.copy(ctx)
+                                if (ordered) {
+                                    pending.resultCode = Activity.RESULT_OK
+                                    pending.resultData = message
+                                    pending.setResultExtras(extras)
+                                }
+                            } catch (t: Throwable) {
+                                L.hookError("ServiceHooks.logCopy", t)
+                            } finally {
+                                pending.finish()
+                            }
+                        }, "DoubaoLogCopy").start()
+                        return
+                    }
                     val msg = when (cmd) {
                         ConfigSpec.CMD_EDIT_ADD -> EditHooks.setToolbar(true)
                         ConfigSpec.CMD_EDIT_REMOVE -> EditHooks.setToolbar(false)
-                        ConfigSpec.CMD_LOG_COPY -> LogStore.copy(ctx)
                         ConfigSpec.CMD_LOG_SAVE -> LogStore.save(ctx)
                         ConfigSpec.CMD_LOG_CLEAR -> LogStore.clear()
                         ConfigSpec.CMD_NATIVE_SCAN -> NativeBackup.scanDataTree(ctx)
@@ -266,14 +306,7 @@ object ServiceHooks {
                         resultCode = Activity.RESULT_OK
                         resultData = msg ?: if (cmd == null) "已保存" else shortStatus(ctx)
                         // 豆包里正在运行的模块版本及在输入法内直接切换过的开关状态
-                        setResultExtras(android.os.Bundle().apply {
-                            putInt("moduleVersion", ConfigSpec.MODULE_VERSION_CODE)
-                            putBoolean("active", VirtualKeys.enabled)
-                            putBoolean("sync_upperOperation", Config.b("upperOperation"))
-                            for (k in ConfigSpec.TOOLBAR_TOGGLE_KEYS) {
-                                putBoolean("sync_$k", Config.b(k))
-                            }
-                        })
+                        setResultExtras(statusExtras(intent))
                         L.i("状态：${status(ctx)}")
                     }
                 } catch (t: Throwable) {

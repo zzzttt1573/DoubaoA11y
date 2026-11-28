@@ -20,12 +20,23 @@ object SpeechEngine {
     private var ready = false
     private var failedAt = 0L
 
+    private fun configKey(p: SharedPreferences): String {
+        val sb = StringBuilder(64)
+        sb.append(p.getString("ttsEngine", "").orEmpty()).append('|')
+            .append(p.getString("ttsVoice", "").orEmpty()).append('|')
+            .append(p.getInt("ttsRate", 100)).append('|')
+            .append(p.getInt("ttsPitch", 100)).append('|')
+            .append(p.getInt("ttsVolume", 100)).append('|')
+            .append(p.getBoolean("ttsA11yStream", false))
+        return sb.toString()
+    }
+
     @Synchronized
     fun prepare(ctx: Context, p: SharedPreferences) {
-        val key = listOf("ttsEngine", "ttsVoice").joinToString("|") { p.getString(it, "").orEmpty() } +
-            listOf("ttsRate", "ttsPitch", "ttsVolume").joinToString("|") { p.getInt(it, 100).toString() } + p.getBoolean("ttsA11yStream", false)
+        val key = configKey(p)
         if (key == config && (ready || starting || android.os.SystemClock.uptimeMillis() - failedAt < 5000)) return
-        reset()
+        val detached = detachLocked()
+        if (detached != null) shutdownDetached(detached)
         config = key
         starting = true
         val token = ++generation
@@ -59,12 +70,13 @@ object SpeechEngine {
                         }
                     })
                     main.postDelayed({
-                        synchronized(this) {
+                        val detached = synchronized(this) {
                             if (token == generation && starting) {
-                                reset()
                                 failedAt = android.os.SystemClock.uptimeMillis()
-                            }
+                                detachLocked()
+                            } else null
                         }
+                        if (detached != null) shutdownDetached(detached)
                     }, 5000)
                 } catch (t: Throwable) {
                     starting = false
@@ -152,12 +164,19 @@ object SpeechEngine {
     @Synchronized
     fun stop() { try { engine?.stop() } catch (_: Throwable) { } }
 
-    @Synchronized
-    private fun reset() {
+    private fun detachLocked(): TextToSpeech? {
         generation++
         starting = false
         ready = false
-        try { engine?.stop(); engine?.shutdown() } catch (_: Throwable) { }
+        val old = engine
         engine = null
+        return old
+    }
+
+    private fun shutdownDetached(old: TextToSpeech) {
+        main.post {
+            try { old.stop() } catch (t: Throwable) { android.util.Log.w("DoubaoA11y", "停止旧语音引擎失败", t) }
+            try { old.shutdown() } catch (t: Throwable) { android.util.Log.w("DoubaoA11y", "释放旧语音引擎失败", t) }
+        }
     }
 }

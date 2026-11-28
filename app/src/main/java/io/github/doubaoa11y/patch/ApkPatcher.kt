@@ -12,7 +12,6 @@ import io.github.doubaoa11y.ConfigSpec
 import org.json.JSONObject
 import java.io.BufferedOutputStream
 import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -87,6 +86,7 @@ object ApkPatcher {
         val splitApks: List<File> = emptyList(),
         val embeddedModuleVersion: Int = -1,
         val embeddedModuleMatchesCurrent: Boolean = false,
+        val sourceIdentity: String = "",
         val signedByLocalKey: Boolean = false
     )
 
@@ -97,25 +97,36 @@ object ApkPatcher {
         val isHotUpdate: Boolean,
         val doubaoVersionCode: Long,
         val doubaoVersionName: String,
-        val moduleVersionCode: Int
-    )
+        val moduleVersionCode: Int,
+        val sourceSplitCount: Int
+    ) {
+        val singleApk get() = splitApks.isEmpty() && sourceSplitCount == 0
+    }
 
     fun outputDir(context: Context): File = File(context.cacheDir, "patched_doubao")
 
-    private fun metaFile(context: Context): File = File(outputDir(context), "meta.json")
+    private fun pointer(context: Context) = File(outputDir(context), "current")
 
-    /** 清理缓存的修补产物 */
-    fun clearPrepared(context: Context) {
-        outputDir(context).deleteRecursively()
+    @Synchronized
+    fun clearPrepared(context: Context, prepared: PreparedOutput) {
+        val current = pointer(context)
+        if (current.isFile && current.readText() == prepared.dir.name) current.delete()
+        prepared.dir.deleteRecursively()
     }
 
-    /** 读取已生成且尚未清理的修补产物 */
-    fun loadPrepared(context: Context): PreparedOutput? {
-        val dir = outputDir(context)
-        val mf = metaFile(context)
-        if (!mf.isFile) return null
+    fun confirmUninstall(prepared: PreparedOutput) {
+        File(prepared.dir, "verified").writeText("ok")
+    }
+
+    fun loadPrepared(context: Context, status: DoubaoStatus): PreparedOutput? {
         return try {
-            val j = JSONObject(mf.readText())
+            val generation = pointer(context).readText()
+            val dir = File(outputDir(context), generation)
+            val j = JSONObject(File(dir, "meta.json").readText())
+            if (j.getString("moduleDex") != computeDexFingerprint(File(context.applicationInfo.sourceDir))) return null
+            if (status.kind == PatchKind.NOT_INSTALLED) {
+                if (!File(dir, "verified").isFile || j.getBoolean("isHotUpdate")) return null
+            } else if (j.getString("sourceIdentity") != status.sourceIdentity) return null
             val modVer = j.optInt("moduleVersionCode", -1)
             if (modVer != ConfigSpec.MODULE_VERSION_CODE) return null
             val base = File(dir, j.getString("baseName"))
@@ -129,6 +140,9 @@ object ApkPatcher {
                     splits.add(f)
                 }
             }
+            val sizes = j.getJSONArray("sizes")
+            val files = listOf(base) + splits
+            if (sizes.length() != files.size || files.withIndex().any { (i, f) -> f.length() <= 0 || f.length() != sizes.getLong(i) }) return null
             PreparedOutput(
                 dir = dir,
                 baseApk = base,
@@ -136,6 +150,7 @@ object ApkPatcher {
                 isHotUpdate = j.optBoolean("isHotUpdate", false),
                 doubaoVersionCode = j.optLong("doubaoVersionCode", 0L),
                 doubaoVersionName = j.optString("doubaoVersionName", ""),
+                sourceSplitCount = j.getInt("sourceSplitCount"),
                 moduleVersionCode = modVer
             )
         } catch (_: Throwable) {
@@ -154,7 +169,7 @@ object ApkPatcher {
         val vName = pkgInfo.versionName ?: ""
         val supported = ConfigSpec.SUPPORTED_VERSIONS.containsKey(vCode)
         val baseApk = File(appInfo.sourceDir)
-        val splitApks = appInfo.splitSourceDirs?.map { File(it) }?.filter { it.isFile } ?: emptyList()
+        val splitApks = appInfo.splitSourceDirs?.map { File(it) } ?: emptyList()
 
         val localKey = LocalKeystore.loadIfExists(context)
         val installedSha256 = getInstalledCertSha256(pkgInfo)
@@ -205,6 +220,15 @@ object ApkPatcher {
             splitApks = splitApks,
             embeddedModuleVersion = embeddedVer,
             embeddedModuleMatchesCurrent = embeddedMatches,
+            sourceIdentity = JSONObject().apply {
+                put("package", pkgInfo.packageName)
+                put("version", vCode)
+                put("updated", pkgInfo.lastUpdateTime)
+                put("certificate", installedSha256?.let { Base64.encodeToString(it, Base64.NO_WRAP) })
+                put("files", org.json.JSONArray((listOf(baseApk) + splitApks).map {
+                    listOf(it.absolutePath, it.length(), it.lastModified()).joinToString("|")
+                }))
+            }.toString(),
             signedByLocalKey = signedByLocal
         )
     }
@@ -229,22 +253,21 @@ object ApkPatcher {
         onProgress("正在准备本机签名密钥…")
         val material = LocalKeystore.loadOrCreate(context)
 
-        val outDir = outputDir(context)
-        outDir.deleteRecursively()
-        outDir.mkdirs()
-
-        onProgress("正在准备无障碍模块副本…")
+        val outDir = File(outputDir(context), java.util.UUID.randomUUID().toString())
+        check(outDir.mkdirs()) { "无法创建修补目录" }
         val slimModule = File(outDir, "module_slim.apk")
-        buildSlimModuleApk(context, slimModule)
-
-        val t0 = System.currentTimeMillis()
-        PatchLog.i(
-            context,
-            "开始修补豆包：kind=${st.kind} version=${st.versionName}(${st.versionCode}) " +
-                "base=${baseApk.length() / (1024 * 1024)}MB splits=${st.splitApks.size} " +
-                "device=${PatchLog.deviceSummary(context)}"
-        )
         return try {
+
+            onProgress("正在准备无障碍模块副本…")
+            buildSlimModuleApk(context, slimModule)
+
+            val t0 = System.currentTimeMillis()
+            PatchLog.i(
+                context,
+                "开始修补豆包：kind=${st.kind} version=${st.versionName}(${st.versionCode}) " +
+                    "base=${baseApk.length() / (1024 * 1024)}MB splits=${st.splitApks.size} " +
+                    "device=${PatchLog.deviceSummary(context)}"
+            )
             val out = if (st.kind == PatchKind.LOCAL_INTEGRATED) {
                 hotUpdateModule(context, st, baseApk, slimModule, material, outDir, onProgress)
             } else {
@@ -255,8 +278,11 @@ object ApkPatcher {
                 "修补完成（耗时 ${(System.currentTimeMillis() - t0) / 1000.0}s）：" +
                     "hotUpdate=${out.isHotUpdate} base=${out.baseApk.length() / (1024 * 1024)}MB splits=${out.splitApks.size}"
             )
+            check(inspect(context).sourceIdentity == st.sourceIdentity) { "豆包已变更，请重新修补" }
+            savePreparedMeta(context, out, st)
             out
         } catch (t: Throwable) {
+            outDir.deleteRecursively()
             PatchLog.e(context, "修补豆包失败", t)
             throw t
         } finally {
@@ -321,9 +347,9 @@ object ApkPatcher {
             isHotUpdate = false,
             doubaoVersionCode = st.versionCode,
             doubaoVersionName = st.versionName,
-            moduleVersionCode = ConfigSpec.MODULE_VERSION_CODE
+            moduleVersionCode = ConfigSpec.MODULE_VERSION_CODE,
+            sourceSplitCount = st.splitApks.size
         )
-        savePreparedMeta(context, prepared)
         return prepared
     }
 
@@ -402,14 +428,18 @@ object ApkPatcher {
             isHotUpdate = true,
             doubaoVersionCode = st.versionCode,
             doubaoVersionName = st.versionName,
-            moduleVersionCode = ConfigSpec.MODULE_VERSION_CODE
+            moduleVersionCode = ConfigSpec.MODULE_VERSION_CODE,
+            sourceSplitCount = st.splitApks.size
         )
-        savePreparedMeta(context, prepared)
         return prepared
     }
 
-    private fun savePreparedMeta(context: Context, p: PreparedOutput) {
+    private fun savePreparedMeta(context: Context, p: PreparedOutput, status: DoubaoStatus) {
         val j = JSONObject().apply {
+            put("sourceIdentity", status.sourceIdentity)
+            put("sourceSplitCount", p.sourceSplitCount)
+            put("moduleDex", requireNotNull(computeDexFingerprint(File(context.applicationInfo.sourceDir))))
+            put("sizes", org.json.JSONArray((listOf(p.baseApk) + p.splitApks).map { it.length() }))
             put("baseName", p.baseApk.name)
             put("isHotUpdate", p.isHotUpdate)
             put("doubaoVersionCode", p.doubaoVersionCode)
@@ -417,7 +447,10 @@ object ApkPatcher {
             put("moduleVersionCode", p.moduleVersionCode)
             put("splitNames", org.json.JSONArray(p.splitApks.map { it.name }))
         }
-        metaFile(context).writeText(j.toString())
+        File(p.dir, "meta.json").writeText(j.toString())
+        val next = File(p.dir, "publish")
+        next.writeText(p.dir.name)
+        synchronized(this) { android.system.Os.rename(next.path, pointer(context).path) }
     }
 
     // ---------------- Manifest 与配置构造 ----------------
@@ -427,13 +460,16 @@ object ApkPatcher {
         val configJsonBytes: ByteArray
     )
 
+    private fun readManifest(zf: ZipFile, entry: ZipEntry): AndroidManifestBlock {
+        val raw = zf.getInputStream(entry).use { it.readBytes() }
+        return AndroidManifestBlock().apply { readBytes(ByteArrayInputStream(raw)) }
+    }
+
     private fun patchManifest(origBaseApk: File, origSigB64: String): ManifestPatchResult {
-        val rawManifest = ZipFile(origBaseApk).use { zf ->
+        val manifest = ZipFile(origBaseApk).use { zf ->
             val e = zf.getEntry("AndroidManifest.xml") ?: error("豆包安装包缺少 AndroidManifest.xml")
-            zf.getInputStream(e).use { it.readBytes() }
+            readManifest(zf, e)
         }
-        val manifest = AndroidManifestBlock()
-        manifest.readBytes(ByteArrayInputStream(rawManifest))
         val app = manifest.applicationElement ?: error("AndroidManifest.xml 缺少 application 节点")
 
         val origFactory = app.searchAttributeByResourceId(RES_ID_APP_COMPONENT_FACTORY)?.valueAsString
@@ -608,9 +644,7 @@ object ApkPatcher {
 
     private fun updateManifestLspatchMeta(zf: ZipFile, newConfigBytes: ByteArray): ByteArray {
         val e = zf.getEntry("AndroidManifest.xml") ?: error("缺少 AndroidManifest.xml")
-        val raw = zf.getInputStream(e).use { it.readBytes() }
-        val manifest = AndroidManifestBlock()
-        manifest.readBytes(ByteArrayInputStream(raw))
+        val manifest = readManifest(zf, e)
         val app = manifest.applicationElement ?: error("AndroidManifest.xml 缺少 application 节点")
         val configBase64 = Base64.encodeToString(newConfigBytes, Base64.NO_WRAP)
         var updated = false
@@ -634,9 +668,7 @@ object ApkPatcher {
 
     private fun ensureManifestQueriesFromZip(zf: ZipFile): ByteArray? {
         val e = zf.getEntry("AndroidManifest.xml") ?: return null
-        val raw = zf.getInputStream(e).use { it.readBytes() }
-        val manifest = AndroidManifestBlock()
-        manifest.readBytes(ByteArrayInputStream(raw))
+        val manifest = readManifest(zf, e)
         if (!ensureReaderQueries(manifest)) return null
         manifest.refresh()
         return manifest.bytes

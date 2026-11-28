@@ -11,6 +11,9 @@ object GesturePage {
     fun fill(a: SettingsActivity, root: LinearLayout) {
         a.addKeysNoHint(root, "upperOperation", "gestureSensitivity")
 
+        root.addView(a.heading("手势朗读"))
+        a.addKeysNoHint(root, "fsCursorExplainWord", "fsCursorExplainLetter", "fsBoundarySpeakMode")
+
         root.addView(a.heading("编辑菜单"))
         root.addView(a.button("自定义编辑菜单") {
             a.startActivity(Intent(a, SettingsActivity::class.java).putExtra(SettingsActivity.EXTRA_PAGE, SettingsActivity.EDITOPTS))

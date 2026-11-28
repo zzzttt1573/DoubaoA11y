@@ -19,6 +19,8 @@ object BackupResourceTransaction {
             var previous: File? = null
             var installed = false
             var originalMoved = false
+            var settingsStarted = false
+            var iconStarted = false
             var finished = false
             try {
                 if (incoming != null) {
@@ -46,13 +48,15 @@ object BackupResourceTransaction {
                     Files.move(next.toPath(), soundDirectory.toPath(), StandardCopyOption.ATOMIC_MOVE)
                     installed = true
                 }
+                settingsStarted = true
                 applySettings()
+                iconStarted = true
                 applyIcon()
                 finished = true
             } catch (failure: Throwable) {
                 var rollbackFailed = false
-                try { rollbackSettings() } catch (t: Throwable) { failure.addSuppressed(t); rollbackFailed = true }
-                try { rollbackIcon() } catch (t: Throwable) { failure.addSuppressed(t); rollbackFailed = true }
+                try { if (settingsStarted) rollbackSettings() } catch (t: Throwable) { failure.addSuppressed(t); rollbackFailed = true }
+                try { if (iconStarted) rollbackIcon() } catch (t: Throwable) { failure.addSuppressed(t); rollbackFailed = true }
                 try {
                     if (installed && !soundDirectory.deleteRecursively()) error("无法移除恢复中的音频")
                     if (originalMoved) Files.move(previous!!.toPath(), soundDirectory.toPath(), StandardCopyOption.ATOMIC_MOVE)

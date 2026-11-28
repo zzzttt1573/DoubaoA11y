@@ -41,11 +41,9 @@ object LocalKeystore {
     @Synchronized
     fun loadOrCreate(context: Context): Material {
         val file = storeFile(context)
-        if (file.isFile) {
-            try {
-                return load(file)
-            } catch (_: Throwable) {
-                // 损坏时重建
+        if (!java.nio.file.Files.notExists(file.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            return try { load(file) } catch (failure: Exception) {
+                throw IllegalStateException("已有本机签名密钥无法读取，已保留原文件", failure)
             }
         }
         val created = generate()
@@ -76,11 +74,15 @@ object LocalKeystore {
         val ks = KeyStore.getInstance("PKCS12")
         ks.load(null, null)
         ks.setKeyEntry(ALIAS, m.privateKey, STORE_PASS, arrayOf(m.certificate))
-        val tmp = File(file.parentFile, "$FILE_NAME.tmp")
-        tmp.outputStream().use { ks.store(it, STORE_PASS) }
-        if (file.exists()) file.delete()
-        if (!tmp.renameTo(file)) {
-            tmp.copyTo(file, overwrite = true)
+        val tmp = File.createTempFile("local-key-", ".tmp", file.parentFile)
+        try {
+            tmp.outputStream().use { ks.store(it, STORE_PASS); it.fd.sync() }
+            val verified = load(tmp)
+            check(verified.certSha256.contentEquals(m.certSha256) &&
+                verified.privateKey.encoded.contentEquals(m.privateKey.encoded)) { "签名密钥回读验证失败" }
+            // 私有目录内硬链接原子创建；目标已存在时失败，不会替换已有身份。
+            java.nio.file.Files.createLink(file.toPath(), tmp.toPath())
+        } finally {
             tmp.delete()
         }
     }

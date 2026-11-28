@@ -48,7 +48,7 @@ object Config {
             ConfigSpec.migrateGestureDefaults(p)
             ConfigSpec.migrateEditOptions(p)
             applyPrefs(p)
-            customWords = parseWords(p.getString(ConfigSpec.EXTRA_CUSTOM_WORDS, null))
+            words.applyWords(p.getString(ConfigSpec.EXTRA_CUSTOM_WORDS, null))
         } catch (t: Throwable) {
             L.e("读取设置失败，使用默认值", t)
         }
@@ -84,7 +84,8 @@ object Config {
                 if (isDirty(k)) setFromIme(ctx, k, values[k] ?: (ConfigSpec.defaults[k] ?: false))
             }
             if (isDirty("toolbarCustomOrder")) setStrFromIme(ctx, "toolbarCustomOrder", strs["toolbarCustomOrder"] ?: "")
-            val b = ctx.contentResolver.call(PULL_URI, "dump", null, null) ?: return false
+            val req = appliedWordsVer?.let { v -> android.os.Bundle().apply { putString("wordsVer", v) } }
+            val b = ctx.contentResolver.call(PULL_URI, "dump", null, req) ?: return false
             var changed = false
             val e = prefs?.edit()
             for (item in ConfigSpec.items) {
@@ -116,13 +117,13 @@ object Config {
                 }
                 e?.putString(item.key, v)
             }
-            b.getString(ConfigSpec.EXTRA_CUSTOM_WORDS)?.let { w ->
-                if (w != lastWords) {
-                    lastWords = w
-                    customWords = parseWords(w)
+            if (b.containsKey(ConfigSpec.EXTRA_CUSTOM_WORDS)) {
+                val w = b.getString(ConfigSpec.EXTRA_CUSTOM_WORDS).orEmpty()
+                if (words.applyWords(w)) {
                     e?.putString(ConfigSpec.EXTRA_CUSTOM_WORDS, w)
                     changed = true
                 }
+                appliedWordsVer = b.getString("wordsVer") ?: "${w.length}:${w.hashCode()}"
             }
             if (changed) {
                 e?.apply()
@@ -144,7 +145,9 @@ object Config {
     }
 
     private var lastPull = 0L
-    private var lastWords = ""
+    private val words = CustomWordState()
+    @Volatile
+    private var appliedWordsVer: String? = null
 
     /**
      * 把某个设置值写回设置页那一份（豆包进程里改的设置也要能持久）。
@@ -237,25 +240,12 @@ object Config {
         }
     }
 
-    /** 自定义解释词：字 -> 词 */
-    @Volatile
-    var customWords: Map<Char, String> = emptyMap()
-        private set
-
-    fun parseWords(s: String?): Map<Char, String> {
-        if (s.isNullOrBlank()) return emptyMap()
-        val m = HashMap<Char, String>()
-        for (line in s.split('\n')) {
-            val tab = line.indexOf('\t')
-            if (tab != 1) continue
-            val w = line.substring(2).trim()
-            if (w.isNotEmpty()) m[line[0]] = w
-        }
-        return m
-    }
+    /** 自定义解释词：单字（含扩展区代理对汉字） -> 词 */
+    val customWords: Map<String, String> get() = words.customWords
 
     fun setCustomWords(s: String) {
-        customWords = parseWords(s)
+        words.applyWords(s)
+        appliedWordsVer = "${s.length}:${s.hashCode()}"
         try {
             prefs?.edit()?.putString(ConfigSpec.EXTRA_CUSTOM_WORDS, s)?.apply()
         } catch (t: Throwable) {

@@ -65,13 +65,7 @@ object BackupFormat {
         val words = if (root.has("customWords")) root.get("customWords").also {
             require(it is String && it.length <= 200000) { "自定义解释词格式错误或过长" }
         } as String else null
-        if (words != null) {
-            val seen = HashSet<Char>()
-            for (line in words.split('\n').filter { it.isNotBlank() }) {
-                require(line.indexOf('\t') == 1 && line.length in 3..258 && line[0] in '一'..'鿿' &&
-                    line.substring(2).isNotBlank() && !line.substring(2).contains('\t') && seen.add(line[0])) { "自定义解释词条目无效" }
-            }
-        }
+        if (words != null) WordTransferFormat.parseText(words)
         val show = if (root.has("showLauncher")) root.get("showLauncher").also {
             require(it is Boolean) { "桌面图标状态格式错误" }
         } as Boolean else null

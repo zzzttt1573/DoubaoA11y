@@ -123,9 +123,17 @@ class DrawTable(var windowName: String) {
     var height = 0
     var frames = 0L
     var drawsOutsideOnDraw = 0L
-    var changed = false
+    var revision = 0L
+        private set
+    private var accessibilityRevision = 0L
+    var dumpRevision = 0L
     var lastDumpText: String? = null
-    val lastDirty = Rect()
+
+    @JvmName("scheduleAccessibilityIfChanged")
+    internal inline fun scheduleAccessibilityIfChanged(schedule: () -> Boolean) {
+        val current = revision
+        if (current != accessibilityRevision && schedule()) accessibilityRevision = current
+    }
 
     /** 本帧画过预览气泡，之后的绘制项都属于气泡 */
     var inPopup = false
@@ -133,25 +141,32 @@ class DrawTable(var windowName: String) {
     fun beginFrame(dirty: Rect) {
         frames++
         inPopup = false
-        lastDirty.set(dirty)
         val before = items.size
         items.removeAll { Rect.intersects(it.rect, dirty) || it.rect.isEmpty && dirty.contains(it.rect.left, it.rect.top) }
-        if (items.size != before) changed = true
+        if (items.size != before) revision++
     }
 
     fun add(item: DrawItem) {
         if (inPopup) item.popup = true
         items.add(item)
-        changed = true
+        revision++
     }
 
     fun clear() {
         items.clear()
-        changed = true
+        revision++
     }
 
-    /** 把绘制项归并成键 */
+    private var cachedKeysRevision = -1L
+    private var cachedKeysWidth = -1
+    private var cachedKeysHeight = -1
+    private var cachedKeys: List<Key>? = null
+
+    /** 把绘制项归并成键（按 revision 与尺寸缓存，避免每次手指移动重建整张键表） */
     fun keys(): List<Key> {
+        cachedKeys?.let { hit ->
+            if (cachedKeysRevision == revision && cachedKeysWidth == width && cachedKeysHeight == height) return hit
+        }
         val viewArea = max(1, width) * max(1, height).toLong()
         // 太大的背景框（整块键盘背景等）不算键
         val live = items.filter { !it.popup }
@@ -166,8 +181,16 @@ class DrawTable(var windowName: String) {
             if (it.kind == DrawItem.Kind.TEXT && (it.text.isNullOrBlank())) continue
             val cx = it.cx().toInt()
             val cy = it.cy().toInt()
-            val box = boxes.filter { b -> b.rect.contains(cx, cy) }
-                .minByOrNull { b -> b.rect.width().toLong() * b.rect.height() }
+            var box: DrawItem? = null
+            var smallestArea = Long.MAX_VALUE
+            for (candidate in boxes) {
+                if (!candidate.rect.contains(cx, cy)) continue
+                val area = candidate.rect.width().toLong() * candidate.rect.height()
+                if (area < smallestArea) {
+                    box = candidate
+                    smallestArea = area
+                }
+            }
             if (box == null) orphans.add(it) else labelsOf.getOrPut(box) { ArrayList() }.add(it)
         }
         val keys = ArrayList<Key>()
@@ -195,6 +218,10 @@ class DrawTable(var windowName: String) {
             if (!clipped) keys.add(Key(Rect(o.rect), null, listOf(o)))
         }
         keys.sortWith(compareBy<Key> { it.rect.top / 8 }.thenBy { it.rect.left })
+        cachedKeysRevision = revision
+        cachedKeysWidth = width
+        cachedKeysHeight = height
+        cachedKeys = keys
         return keys
     }
 
@@ -314,12 +341,30 @@ class DrawTable(var windowName: String) {
      * maxDist 以内最近的、有名字的键和它的距离，没有就返回 null。
      * 给落指死区兜底用：手指落在键盘视图外面时 keyAt 根本不会被问到。距离一样时取小键。
      */
-    fun nearest(x: Float, y: Float, maxDist: Float): Pair<Key, Float>? =
-        keys().filter { it.speakable().isNotBlank() }
-            .map { it to rectDist(it.rect, x, y) }
-            .filter { it.second <= maxDist }
-            .minWithOrNull(compareBy<Pair<Key, Float>> { it.second }
-                .thenBy { it.first.rect.width().toLong() * it.first.rect.height() })
+    fun nearest(x: Float, y: Float, maxDist: Float): Pair<Key, Float>? {
+        val ks = keys()
+        var bestKey: Key? = null
+        var bestDist = Float.MAX_VALUE
+        var bestArea = Long.MAX_VALUE
+        var i = 0
+        val n = ks.size
+        while (i < n) {
+            val k = ks[i]
+            if (k.speakable().isNotBlank()) {
+                val d = rectDist(k.rect, x, y)
+                if (d <= maxDist) {
+                    val area = k.rect.width().toLong() * k.rect.height()
+                    if (bestKey == null || d < bestDist || (d == bestDist && area < bestArea)) {
+                        bestKey = k
+                        bestDist = d
+                        bestArea = area
+                    }
+                }
+            }
+            i++
+        }
+        return bestKey?.let { it to bestDist }
+    }
 
     private fun rectDist(r: Rect, x: Float, y: Float): Float {
         val dx = max(0f, max(r.left - x, x - r.right))

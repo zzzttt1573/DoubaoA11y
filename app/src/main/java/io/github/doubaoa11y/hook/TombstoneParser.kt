@@ -297,8 +297,7 @@ object TombstoneParser {
                     if (targetTid > 0 && key != targetTid) return null
                 } else if (!r.skipField(wire)) break
                 2 -> if (wire == 2) {
-                    val len = r.readVarint().toInt()
-                    if (len < 0 || r.pos + len > r.end) return null
+                    val len = r.readLength() ?: return null
                     valStart = r.pos
                     valEnd = r.pos + len
                     r.pos = valEnd
@@ -333,8 +332,7 @@ object TombstoneParser {
                     if (note.isNotEmpty() && notes.size < 4) notes.add(note)
                 } else if (!r.skipField(wire)) break
                 6 -> if (wire == 2) {
-                    val len = r.readVarint().toInt()
-                    if (len < 0 || r.pos + len > r.end) break
+                    val len = r.readLength() ?: break
                     val fStart = r.pos
                     val fEnd = r.pos + len
                     r.pos = fEnd
@@ -344,8 +342,7 @@ object TombstoneParser {
                 } else if (!r.skipField(wire)) break
                 7 -> if (wire == 2) {
                     hasMemoryDump = true
-                    val len = r.readVarint().toInt()
-                    if (len < 0 || r.pos + len > r.end) break
+                    val len = r.readLength() ?: break
                     val mStart = r.pos
                     val mEnd = r.pos + len
                     r.pos = mEnd
@@ -445,7 +442,7 @@ object TombstoneParser {
         fun readVarint(): Long = readVarintOrEof()
 
         fun readExact(len: Int): ByteArray? {
-            if (len < 0 || totalRead + len > maxBytes) {
+            if (len < 0 || len > maxBytes - totalRead) {
                 eof = true
                 return null
             }
@@ -484,7 +481,7 @@ object TombstoneParser {
         }
 
         fun skipExact(len: Long): Boolean {
-            if (len < 0L || totalRead + len > maxBytes) {
+            if (len < 0L || len > maxBytes - totalRead) {
                 eof = true
                 return false
             }
@@ -542,12 +539,17 @@ object TombstoneParser {
             return 0L
         }
 
-        fun readString(maxLen: Int): String {
-            val len = readVarint().toInt()
-            if (eof || len <= 0 || pos + len > end) {
-                if (len > 0) pos = end
-                return ""
+        fun readLength(): Int? {
+            val len = readVarint()
+            if (eof || len < 0 || len > end - pos) {
+                eof = true
+                return null
             }
+            return len.toInt()
+        }
+
+        fun readString(maxLen: Int): String {
+            val len = readLength() ?: return ""
             val actual = minOf(len, maxLen)
             val s = String(buf, pos, actual, Charsets.UTF_8)
             pos += len
@@ -559,12 +561,12 @@ object TombstoneParser {
                 readVarint()
                 !eof
             }
-            1 -> if (pos + 8 <= end) { pos += 8; true } else { pos = end; eof = true; false }
+            1 -> if (8 <= end - pos) { pos += 8; true } else { pos = end; eof = true; false }
             2 -> {
-                val len = readVarint().toInt()
-                if (!eof && len >= 0 && pos + len <= end) { pos += len; true } else { pos = end; eof = true; false }
+                val len = readLength()
+                if (len == null) false else { pos += len; true }
             }
-            5 -> if (pos + 4 <= end) { pos += 4; true } else { pos = end; eof = true; false }
+            5 -> if (4 <= end - pos) { pos += 4; true } else { pos = end; eof = true; false }
             else -> false
         }
     }

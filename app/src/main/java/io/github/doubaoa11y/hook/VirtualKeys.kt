@@ -83,17 +83,21 @@ object VirtualKeys {
 
     private fun refreshKeys(v: View): List<Key> {
         val s = state(v)
-        val t = KeyboardViewHooks.tableOf(v) ?: return s.keys.also { s.keys = emptyList() }
+        val t = KeyboardViewHooks.tableOf(v)
+        if (t == null) {
+            s.keys = emptyList()
+            return s.keys
+        }
         val ks = t.keys().filter { it.rect.width() > 0 && it.rect.height() > 0 && it.speakable().isNotBlank() }
         s.keys = ks
         return ks
     }
 
     /** 绘制后调用：按键变了就通知读屏刷新 */
-    fun onTableChanged(v: View) {
-        if (!enabled) return
+    fun onTableChanged(v: View): Boolean {
+        if (!enabled) return false
         main.removeCallbacksAndMessages(v)
-        main.postAtTime({
+        return main.postAtTime({
             try {
                 val s = state(v)
                 val old = s.signature
@@ -110,7 +114,7 @@ object VirtualKeys {
             } catch (t: Throwable) {
                 L.hookError("VirtualKeys.onTableChanged", t)
             }
-        }, v, SystemClock.uptimeMillis() + 150)
+        }, v, SystemClock.uptimeMillis() + 48)
     }
 
     // ---------------- 无障碍节点 ----------------
@@ -120,15 +124,16 @@ object VirtualKeys {
         return providers.getOrPut(v) { Provider(v) }
     }
 
-    private class Provider(val host: View) : AccessibilityNodeProvider() {
+    private class Provider(host: View) : AccessibilityNodeProvider() {
+        private val hostRef = java.lang.ref.WeakReference(host)
         override fun createAccessibilityNodeInfo(virtualViewId: Int): AccessibilityNodeInfo? = try {
-            if (virtualViewId == HOST) hostNode() else keyNode(virtualViewId)
+            hostRef.get()?.let { if (virtualViewId == HOST) hostNode(it) else keyNode(it, virtualViewId) }
         } catch (t: Throwable) {
             L.hookError("VirtualKeys.createNode", t)
             null
         }
 
-        private fun hostNode(): AccessibilityNodeInfo {
+        private fun hostNode(host: View): AccessibilityNodeInfo {
             val info = AccessibilityNodeInfo.obtain(host)
             host.onInitializeAccessibilityNodeInfo(info)
             val ks = refreshKeys(host)
@@ -150,7 +155,7 @@ object VirtualKeys {
             return info
         }
 
-        private fun keyNode(id: Int): AccessibilityNodeInfo? {
+        private fun keyNode(host: View, id: Int): AccessibilityNodeInfo? {
             val s = state(host)
             val k = s.keys.getOrNull(id) ?: return null
             val info = AccessibilityNodeInfo.obtain(host, id)
@@ -179,14 +184,16 @@ object VirtualKeys {
         }
 
         override fun performAction(virtualViewId: Int, action: Int, arguments: Bundle?): Boolean = try {
-            if (virtualViewId == HOST) host.performAccessibilityAction(action, arguments)
-            else keyAction(virtualViewId, action)
+            hostRef.get()?.let { host ->
+                if (virtualViewId == HOST) host.performAccessibilityAction(action, arguments)
+                else keyAction(host, virtualViewId, action)
+            } ?: false
         } catch (t: Throwable) {
             L.hookError("VirtualKeys.performAction", t)
             false
         }
 
-        private fun keyAction(id: Int, action: Int): Boolean {
+        private fun keyAction(host: View, id: Int, action: Int): Boolean {
             val s = state(host)
             val k = s.keys.getOrNull(id) ?: return false
             return when (action) {
@@ -261,11 +268,19 @@ object VirtualKeys {
     private val focusAbove: Boolean get() = keepFocus && A11yState.active
 
     private var barId = 0
+    private var barRef: java.lang.ref.WeakReference<View>? = null
+    private var imeInputViewId = 0
+    private var imeInputViewRef: java.lang.ref.WeakReference<View>? = null
+    private val multiLettersRegex = Regex("[A-Za-z]{2,4}")
+    private val nonTypingKeys = setOf("重写", "返回", "回车", "发送", "收起键盘")
 
     /** 工具栏上边在屏幕上的纵坐标；工具栏不在就返回 null */
     fun toolbarTop(root: View): Int? {
-        if (barId == 0) barId = root.resources.getIdentifier("native_candidate_bar", "id", root.context.packageName)
-        val bar = (if (barId != 0) root.findViewById<View>(barId) else null) ?: return null
+        val cached = barRef?.get()?.takeIf { it.isAttachedToWindow && it.rootView === root }
+        val bar = cached ?: run {
+            if (barId == 0) barId = root.resources.getIdentifier("native_candidate_bar", "id", root.context.packageName)
+            (if (barId != 0) root.findViewById<View>(barId) else null)?.also { barRef = java.lang.ref.WeakReference(it) }
+        } ?: return null
         if (!bar.isShown || bar.height <= 0) return null
         val loc = IntArray(2)
         bar.getLocationOnScreen(loc)
@@ -1009,8 +1024,11 @@ object VirtualKeys {
 
     /** 屏幕坐标 ry 在键盘区域上边往下 12dp 以内，或者更上面 */
     private fun nearTop(root: View, ry: Float): Boolean {
-        val id = root.resources.getIdentifier("ime_inputview", "id", root.context.packageName)
-        val area = (if (id != 0) root.findViewById<View>(id) else null) ?: return false
+        val cached = imeInputViewRef?.get()?.takeIf { it.isAttachedToWindow && it.rootView === root }
+        val area = cached ?: run {
+            if (imeInputViewId == 0) imeInputViewId = root.resources.getIdentifier("ime_inputview", "id", root.context.packageName)
+            (if (imeInputViewId != 0) root.findViewById<View>(imeInputViewId) else null)?.also { imeInputViewRef = java.lang.ref.WeakReference(it) }
+        } ?: return false
         if (!area.isShown || area.height <= 0) return false
         val loc = IntArray(2)
         area.getLocationOnScreen(loc)
@@ -1050,15 +1068,6 @@ object VirtualKeys {
             val p = r.parent as? View ?: return r
             r = p
         }
-    }
-
-    private fun isAncestor(a: View, b: View): Boolean {
-        var p = b.parent
-        while (p is View) {
-            if (p === a) return true
-            p = p.parent
-        }
-        return false
     }
 
     /** 模块合成点击后这段时间里，被点的控件发出的点击、获得焦点事件不交给读屏（免得读屏响点击声、把焦点挪过去） */
@@ -1245,7 +1254,7 @@ object VirtualKeys {
             y = vl[1] + k.rect.exactCenterY()
         }
         L.i("${if (action == MotionEvent.ACTION_UP) "松开" else "取消"}「${k.speakable()}」，按住 ${SystemClock.uptimeMillis() - holdDownTime} 毫秒${if (holdIsVoice) "，区域=$voiceZone" else ""}")
-        val cancelVoice = holdIsVoice && action == MotionEvent.ACTION_UP && voiceZone == "松手撤回输入"
+        val cancelVoice = holdIsVoice && action == MotionEvent.ACTION_UP && isVoiceCancelZone(voiceZone)
         // 按住删除连续删完松手：多选里这一串删除已经把选中的文本删掉了，退出选择态
         if (!holdIsVoice && k.mainName() == "删除" && action == MotionEvent.ACTION_UP) {
             EditActions.onKeyDelete()
@@ -1268,35 +1277,18 @@ object VirtualKeys {
         return asr.visibility == View.VISIBLE && asr.isShown
     }
 
-    /** 语音长按界面：手指滑进左右两个区域时朗读 */
+    private fun isVoiceCancelZone(zone: String): Boolean = VoiceZoneReader.isCancelZone(zone)
+
+    /** 语音长按界面：手指滑进左右两个区域时朗读（底层反射与多版本字段映射委托给 VoiceZoneReader） */
     private fun checkVoiceZone(kb: View) {
-        val asr = try {
-            de.robv.android.xposed.XposedHelpers.getObjectField(kb, "mAsrLongPressView") as? View
-        } catch (_: Throwable) {
-            null
-        } ?: return
-        if (asr.visibility != View.VISIBLE) return
-        val id = asr.resources.getIdentifier("asr_action_btn", "id", asr.context.packageName)
-        val btn = if (id != 0) asr.findViewById<View>(id) else null
-        val left = btn?.let { boolField(it, "r") } ?: false
-        val right = btn?.let { boolField(it, "s") } ?: false
-        val zone = when {
-            left -> "松手撤回输入"
-            right -> "松手一键发送"
-            else -> "松手结束"
-        }
+        val reading = VoiceZoneReader.read(kb) ?: return
+        val zone = reading.zone
         if (zone != voiceZone) {
             val first = voiceZone.isEmpty()
             voiceZone = zone
             if (!first && Config.b("voiceZoneHint")) Speaker.speak(zone)
-            L.i("语音区域：$zone")
+            L.i(reading.debugInfo)
         }
-    }
-
-    private fun boolField(o: Any, name: String): Boolean? = try {
-        de.robv.android.xposed.XposedHelpers.getBooleanField(o, name)
-    } catch (_: Throwable) {
-        null
     }
 
     /** 虚拟按键式：读屏抬手点击时，刚松开长按的不再重复输入 */
@@ -1326,8 +1318,8 @@ object VirtualKeys {
         }
         // 打字：候选栏里接下来弹的候选归“打字”，全屏上半屏的左右滑才去动候选栏。
         // 移动光标之后弹的联想候选不算（见 Candidates.fromTyping），免得编辑文字时左右滑被吃掉。
-        if ((name.length == 1 && name[0].isLetterOrDigit()) || name.matches(Regex("[A-Za-z]{2,4}"))) Candidates.markTyping()
-        else if (name in setOf("重写", "返回", "回车", "发送", "收起键盘")) Candidates.reset("非输入键")
+        if ((name.length == 1 && name[0].isLetterOrDigit()) || multiLettersRegex.matches(name)) Candidates.markTyping()
+        else if (name in nonTypingKeys) Candidates.reset("非输入键")
         // 按键音在手指摸到这个键的时候已经响过了（key_pressed，和参考实现一致），
         // 抬手输入时不再补一声，不然一次按键响两下
         press(v, k, 40)
@@ -1410,8 +1402,10 @@ object VirtualKeys {
             downY = ev.y
             downTime = ev.downTime
             downRoot = root
-            downInScroller = inHorizontalScroller(root, ev.x + loc[0], ev.y + loc[1])
-            val t = targetAt(root, ev.x + loc[0], ev.y + loc[1])
+            val rx = ev.x + loc[0]
+            val ry = ev.y + loc[1]
+            val t = targetAt(root, rx, ry)
+            downInScroller = if (inHandwrite) inHorizontalScroller(root, rx, ry) else false
             if (inHandwrite && !downInScroller) {
                 Candidates.markHandwriting()
                 passThrough = true
@@ -1456,8 +1450,8 @@ object VirtualKeys {
                 if (ev.actionMasked == MotionEvent.ACTION_MOVE) checkVoiceZone(kb)
                 if (ev.actionMasked == MotionEvent.ACTION_UP) {
                     checkVoiceZone(kb)
-                    if (voiceZone == "松手撤回输入") {
-                        L.i("原生空格：松手撤回输入")
+                    if (isVoiceCancelZone(voiceZone)) {
+                        L.i("原生空格：$voiceZone")
                         Voice.discard()
                     }
                 }

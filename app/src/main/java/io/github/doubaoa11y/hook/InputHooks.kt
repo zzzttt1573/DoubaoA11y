@@ -30,9 +30,9 @@ object InputHooks {
     }
 
     /** 上屏监听（后面阶段用来朗读上屏内容） */
-    private val commitListeners = ArrayList<(String, String) -> Unit>()
+    private val commitListeners = ArrayList<() -> Unit>()
 
-    fun onCommit(l: (text: String, source: String) -> Unit) {
+    fun onCommit(l: () -> Unit) {
         commitListeners.add(l)
     }
 
@@ -126,21 +126,27 @@ object InputHooks {
             if (depth != 0) return@SafeHook
             if (Config.b("logJni")) L.i(msg(p.args) + " 来源=" + caller())
             val ic = p.thisObject as? InputConnection
-            if (ic != null && name in setOf("commitText", "setComposingText", "deleteSurroundingText", "deleteSurroundingTextInCodePoints", "sendKeyEvent")) {
-                p.setObjectExtra(SNAPSHOT, TypingEcho.snapshot(ic))
-            }
+            var intercepted = false
             try {
                 if (ic != null && Voice.intercept(name, ic, p.args)) {
                     p.setObjectExtra(INTERCEPTED, true)
                     p.result = true
+                    intercepted = true
                 }
             } catch (t: Throwable) { L.hookError("Voice.intercept", t) }
+            if (!intercepted && ic != null) {
+                val snap = when {
+                    name == "commitText" || name == "setComposingText" -> TypingEcho.snapshotForInput(ic)
+                    isDeletion(name, p.args) -> TypingEcho.snapshotForDelete(ic)
+                    else -> null
+                }
+                if (snap != null) p.setObjectExtra(SNAPSHOT, snap)
+            }
         }, after = { p ->
             if (p.getObjectExtra(ENTERED) != true) return@SafeHook
             val depths = mutationDepth.get()
             val depth = ((depths?.get(name) ?: 1) - 1).coerceAtLeast(0)
             if (depth == 0) depths?.remove(name) else depths?.set(name, depth)
-            if (depths?.isEmpty() == true) mutationDepth.remove()
             if (p.getObjectExtra(ROOT) != true || p.getObjectExtra(INTERCEPTED) == true ||
                 p.throwable != null || p.result != true || !A11yState.recording) return@SafeHook
             val ic = p.thisObject as? InputConnection ?: return@SafeHook
@@ -161,18 +167,16 @@ object InputHooks {
                         EditOptions.markTyped()
                         ClipboardNav.onTyping()
                     }
-                    for (listener in commitListeners) try { listener(value, caller()) } catch (t: Throwable) { L.hookError("IC.commit", t) }
+                    for (listener in commitListeners) try { listener() } catch (t: Throwable) { L.hookError("IC.commit", t) }
                     TypingEcho.successful(ic, name, value, p.getObjectExtra(SNAPSHOT) as? TypingEcho.Snapshot)
+                    if (KeyboardOps.isWatchingOrganize) KeyboardOps.onEditorTextMayHaveChanged()
                 }
                 "finishComposingText" -> {
                     for (listener in finishListeners) try { listener() } catch (t: Throwable) { L.hookError("IC.finish", t) }
                     TypingEcho.successful(ic, name, "", null)
                 }
                 "deleteSurroundingText", "deleteSurroundingTextInCodePoints", "sendKeyEvent" -> {
-                    val event = p.args.firstOrNull() as? KeyEvent
-                    val deleting = name != "sendKeyEvent" || (event?.action == KeyEvent.ACTION_DOWN &&
-                        event.keyCode in setOf(KeyEvent.KEYCODE_DEL, KeyEvent.KEYCODE_FORWARD_DEL))
-                    if (deleting) {
+                    if (isDeletion(name, p.args)) {
                         for (listener in deleteListeners) try { listener() } catch (t: Throwable) { L.hookError("IC.delete", t) }
                         noteDeleted()
                         TypingEcho.deleted(ic, p.getObjectExtra(SNAPSHOT) as? TypingEcho.Snapshot)
@@ -181,6 +185,13 @@ object InputHooks {
                 "setSelection" -> if (!Voice.isRecording() && Candidates.engineTyping() == false) Candidates.onCursorMove()
             }
         }))
+    }
+
+    private fun isDeletion(name: String, args: Array<out Any?>): Boolean {
+        if (name != "sendKeyEvent") return name == "deleteSurroundingText" || name == "deleteSurroundingTextInCodePoints"
+        val event = args.firstOrNull() as? KeyEvent ?: return false
+        return event.action == KeyEvent.ACTION_DOWN &&
+            (event.keyCode == KeyEvent.KEYCODE_DEL || event.keyCode == KeyEvent.KEYCODE_FORWARD_DEL)
     }
 
     /** 调用栈里豆包自己的前几层，用来区分键盘、手写、语音上屏 */

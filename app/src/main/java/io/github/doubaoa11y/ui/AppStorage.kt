@@ -170,6 +170,48 @@ object AppStorage {
         return candidate
     }
 
+    /** 同目录完成写入后独占目标名，其他导出只能选择下一个后缀。 */
+    fun publish(target: File, write: (java.io.OutputStream) -> Unit): File {
+        val dir = requireNotNull(target.parentFile)
+        check(dir.isDirectory || dir.mkdirs() || dir.isDirectory) { "无法创建导出目录" }
+        val tmp = File.createTempFile(".export-", ".part", dir)
+        try {
+            tmp.outputStream().use(write)
+            var candidate = target
+            var suffix = 2
+            while (true) {
+                // 用同目录隐藏文件预订名字；进程中断也不会露出空的最终文件。
+                val reservation = File(dir, "." + candidate.name + ".publishing")
+                if (!candidate.exists() && reservation.createNewFile()) {
+                    try {
+                        // 同目录移动，保留默认的“不覆盖目标”语义。
+                        java.nio.file.Files.move(tmp.toPath(), candidate.toPath())
+                        return candidate
+                    } catch (_: java.nio.file.FileAlreadyExistsException) {
+                        // 等待写入时外部程序占用了名字，继续尝试下一个。
+                    } finally {
+                        reservation.delete()
+                    }
+                }
+                candidate = File(dir, target.nameWithoutExtension + "_" + suffix++ + "." + target.extension)
+            }
+        } finally {
+            tmp.delete()
+        }
+    }
+
+    fun copyLimited(input: java.io.InputStream, output: java.io.OutputStream, limit: Long) {
+        val buffer = ByteArray(64 * 1024)
+        var total = 0L
+        while (true) {
+            val count = input.read(buffer)
+            if (count < 0) break
+            total += count
+            require(total <= limit) { "文件超过大小限制（$limit 字节）" }
+            output.write(buffer, 0, count)
+        }
+    }
+
     fun formatSize(bytes: Long): String = when {
         bytes < 1024L -> "$bytes B"
         bytes < 1024L * 1024L -> "${(bytes + 512L) / 1024L} KB"

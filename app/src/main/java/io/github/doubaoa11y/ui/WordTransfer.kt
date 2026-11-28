@@ -12,7 +12,6 @@ import android.widget.TextView
 import io.github.doubaoa11y.hook.CharWords
 import java.io.File
 import java.io.FileInputStream
-import java.io.FileOutputStream
 
 /** 只交换原格式解释词，不改变内置词库，也不自动读取任何读屏词库。 */
 object WordTransfer {
@@ -22,7 +21,7 @@ object WordTransfer {
 
     private data class WordCandidate(
         val file: File,
-        val words: Map<Char, String>,
+        val words: Map<String, String>,
     )
 
     fun detach(a: SettingsActivity) { dialogs.remove(a)?.dismiss() }
@@ -149,16 +148,18 @@ object WordTransfer {
     private fun exportToFile(a: SettingsActivity, target: File, exportAll: Boolean) {
         val custom = current(a)
         work(a, "正在导出解释词") {
-            val words = LinkedHashMap<Char, String>()
-            if (exportAll) words.putAll(CharWords.builtIn())
+            val words = LinkedHashMap<String, String>()
+            if (exportAll) {
+                words.putAll(CharWords.builtIn())
+            }
             words.putAll(custom)
             val bytes = WordTransferFormat.encode(words)
             target.parentFile?.mkdirs()
-            FileOutputStream(target).use { it.write(bytes) }
+            val published = AppStorage.publish(target) { it.write(bytes) }
             return@work {
                 AlertDialog.Builder(a)
                     .setTitle("导出成功")
-                    .setMessage("已导出 ${words.size} 个解释词。\n保存位置：${AppStorage.displayPath(target)}")
+                    .setMessage("已导出 ${words.size} 个解释词。\n保存位置：${AppStorage.displayPath(published)}")
                     .setPositiveButton("确定", null)
                     .show()
             }
@@ -188,15 +189,20 @@ object WordTransfer {
     }
 
     /** 与原 WordsPage.load 完全相同地读取已有自定义；导出及合并结果仍需严格校验。 */
-    private fun current(a: SettingsActivity): Map<Char, String> {
-        val words = LinkedHashMap<Char, String>()
-        for (line in a.prefs.getString(SettingsActivity.PREF_WORDS, "").orEmpty().split('\n')) {
-            if (line.length >= 3 && line[1] == '\t') words[line[0]] = line.substring(2)
+    private fun current(a: SettingsActivity): Map<String, String> {
+        val words = LinkedHashMap<String, String>()
+        for (raw in a.prefs.getString(SettingsActivity.PREF_WORDS, "").orEmpty().split('\n')) {
+            val line = raw.removeSuffix("\r")
+            val tab = line.indexOf('\t')
+            if (tab in 1..2 && tab < line.lastIndex) {
+                val key = line.substring(0, tab)
+                if (WordTransferFormat.isSingleHan(key)) words[key] = line.substring(tab + 1)
+            }
         }
         return words
     }
 
-    private fun confirm(a: SettingsActivity, imported: Map<Char, String>) {
+    private fun confirm(a: SettingsActivity, imported: Map<String, String>) {
         val before = current(a)
         val covered = imported.keys.count { it in before }
         val removed = before.keys.count { it !in imported }
@@ -213,7 +219,7 @@ object WordTransfer {
         dialog.show()
     }
 
-    private fun restore(a: SettingsActivity, before: Map<Char, String>, imported: Map<Char, String>, replace: Boolean) {
+    private fun restore(a: SettingsActivity, before: Map<String, String>, imported: Map<String, String>, replace: Boolean) {
         try {
             check(current(a) == before) { "自定义解释词已变化，请重新导入并确认" }
             val change = WordTransferFormat.plan(before, imported, replace)

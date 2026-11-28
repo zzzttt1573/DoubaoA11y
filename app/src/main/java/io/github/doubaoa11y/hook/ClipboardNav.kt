@@ -2,10 +2,6 @@ package io.github.doubaoa11y.hook
 
 import android.content.ClipboardManager
 import android.content.Context
-import android.os.Handler
-import android.os.Looper
-import android.os.SystemClock
-import io.github.doubaoa11y.ConfigSpec
 import org.json.JSONArray
 import java.io.File
 
@@ -22,7 +18,6 @@ object ClipboardNav {
     private const val FILE_NAME = "doubao_a11y_clipboard_history.json"
     private const val MAX_ITEMS = 80
 
-    private val main = Handler(Looper.getMainLooper())
     private val lock = Any()
     private val items = ArrayList<String>()
 
@@ -370,30 +365,31 @@ object ClipboardNav {
         }
     }
 
-    private var lastSaveAt = 0L
+    private val writer = java.util.concurrent.ScheduledThreadPoolExecutor(1) { task ->
+        Thread(task, "DoubaoA11yClipSave")
+    }.apply { removeOnCancelPolicy = true }
+    private var saveSequence = 0L
+    private var pendingSave: java.util.concurrent.ScheduledFuture<*>? = null
 
     private fun saveToDiskAsync() {
         val c = ctx ?: return
-        val snapshot = synchronized(lock) { ArrayList(items) }
-        val now = SystemClock.uptimeMillis()
-        lastSaveAt = now
-        main.postDelayed({
-            if (lastSaveAt != now) return@postDelayed
-            Thread({
+        synchronized(lock) {
+            val sequence = ++saveSequence
+            pendingSave?.cancel(false)
+            pendingSave = writer.schedule({
                 try {
-                    val arr = JSONArray()
-                    for (s in snapshot) arr.put(s)
-                    val tmp = File(c.filesDir, "$FILE_NAME.tmp")
-                    val dst = File(c.filesDir, FILE_NAME)
-                    tmp.writeText(arr.toString(), Charsets.UTF_8)
-                    if (!tmp.renameTo(dst)) {
-                        tmp.copyTo(dst, overwrite = true)
-                        tmp.delete()
+                    val snapshot = synchronized(lock) {
+                        if (sequence != saveSequence) return@schedule
+                        ArrayList(items)
                     }
+                    val dst = File(c.filesDir, FILE_NAME)
+                    val tmp = File(c.filesDir, "$FILE_NAME.tmp")
+                    tmp.writeText(JSONArray(snapshot).toString(), Charsets.UTF_8)
+                    android.system.Os.rename(tmp.absolutePath, dst.absolutePath)
                 } catch (t: Throwable) {
-                    L.hookError("ClipboardNav.saveToDisk", t)
+                    L.hookError("ClipboardNav.save", t)
                 }
-            }, "DoubaoA11yClipSave").start()
-        }, 200L)
+            }, 200, java.util.concurrent.TimeUnit.MILLISECONDS)
+        }
     }
 }

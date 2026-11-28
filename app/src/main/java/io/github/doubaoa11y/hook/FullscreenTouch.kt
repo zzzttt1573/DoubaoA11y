@@ -100,8 +100,10 @@ object FullscreenTouch {
     /** 全屏触摸的统一入口，所有手指事件都从这里进来 */
     fun handleTouch(root: View, ev: MotionEvent): Boolean {
         if (!FullscreenMode.wanted || !FullscreenMode.active) return false
-        if (VirtualKeys.injecting || TatansBridge.panelOpen()) return false
+        if (VirtualKeys.injecting) return false
         val action = ev.actionMasked
+        val panelOpen = if (action == MotionEvent.ACTION_DOWN) TatansBridge.panelOpen() else TatansBridge.panelOpenFast()
+        if (panelOpen) return false
         if (action == MotionEvent.ACTION_DOWN) {
             region = NONE
             twoDown = false

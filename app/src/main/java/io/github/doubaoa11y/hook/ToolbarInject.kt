@@ -3,14 +3,11 @@ package io.github.doubaoa11y.hook
 import android.content.Context
 import android.content.res.Configuration
 import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.ColorFilter
 import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.RectF
-import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
-import android.graphics.drawable.GradientDrawable
 import android.os.Handler
 import android.os.Looper
 import android.view.View
@@ -237,7 +234,7 @@ object ToolbarInject {
                 } else {
                     saveOrder(arr.toList())
                 }
-                val filtered = arr.filter { !isCustomKey(it) }.toTypedArray()
+                val filtered = ToolbarOrderPolicy.nativeOnly(arr.toList(), toolMap.keys)
                 p.args[0] = filtered
             }))
 
@@ -245,14 +242,15 @@ object ToolbarInject {
             SafeHook("ToolbarInject.confirm", before = {
                 if (!inEditSession) return@SafeHook
                 val order = draftOrder ?: return@SafeHook
-                val nativeOnly = order.filter { !isCustomKey(it) }
+                val nativeOnly = ToolbarOrderPolicy.nativeOnly(order, toolMap.keys)
                 if (nativeOnly.isNotEmpty()) {
                     try {
                         val jni = JniHooks.jni()
                         if (jni != null) {
                             selfReordering = true
                             try {
-                                XposedHelpers.callMethod(jni, "reorderToolbarButtons", nativeOnly.toTypedArray())
+                                val ok = XposedHelpers.callMethod(jni, "reorderToolbarButtons", nativeOnly)
+                                if (ok == false) L.w("ToolbarInject：豆包 reorderToolbarButtons 返回 false")
                             } finally {
                                 selfReordering = false
                             }
@@ -298,7 +296,6 @@ object ToolbarInject {
 
     /** 进入定制工具栏时构造当前已添加按钮的有序列表，作为后续按点击先后追加的基准 */
     private fun buildInitialVisibleOrder(): MutableList<String> {
-        val visibleSet = LinkedHashSet<String>()
         val nativeVisible = ArrayList<Pair<String, Int>>()
         try {
             val jni = JniHooks.jni()
@@ -325,22 +322,9 @@ object ToolbarInject {
         } catch (t: Throwable) {
             L.hookError("ToolbarInject.buildInitialVisibleOrder", t)
         }
-        val nativeOrdered = nativeVisible.sortedBy { it.second }.map { it.first }
-        for (k in nativeOrdered) visibleSet.add(k)
-        for (t in tools) {
-            if (isToolEnabled(t.key)) visibleSet.add(t.key)
-        }
-        val out = ArrayList<String>(visibleSet.size)
+        val enabledCustom = tools.filter { isToolEnabled(it.key) }.map { it.key }
         val saved = parseOrder(Config.s("toolbarCustomOrder"))
-        if (!saved.isNullOrEmpty()) {
-            for (k in saved) {
-                if (k in visibleSet && k !in out) out.add(k)
-            }
-        }
-        for (k in visibleSet) {
-            if (k !in out) out.add(k)
-        }
-        return out
+        return ToolbarOrderPolicy.mergeInitialOrder(nativeVisible, enabledCustom, saved)
     }
 
     private fun mergeToolbarConfig(raw: String): String? = try {
@@ -895,35 +879,54 @@ object ToolbarInject {
         iv.setImageDrawable(ToolGlyphDrawable(key, fg, ctx.resources.displayMetrics.density, inOptionCard = true, drawCard = drawCard))
     }
 
-    private fun readAdapterScale(adapter: Any): Float {
-        try {
-            val m = adapter.javaClass.declaredMethods.firstOrNull {
-                !Modifier.isStatic(it.modifiers) &&
-                    it.parameterTypes.isEmpty() &&
-                    it.returnType == Float::class.javaPrimitiveType
+    private class AdapterMembers(val type: Class<*>) {
+        private fun <T : java.lang.reflect.AccessibleObject> resolve(label: String, find: () -> List<T>): T? =
+            try {
+                val matches = find()
+                if (matches.size != 1) L.w("工具栏 ${type.name} $label 候选数 ${matches.size}")
+                matches.firstOrNull()?.apply { isAccessible = true }
+            } catch (t: Throwable) {
+                L.hookError("ToolbarInject.resolve ${type.name} $label", t)
+                null
             }
-            if (m != null) {
-                m.isAccessible = true
-                val v = m.invoke(adapter) as? Float
-                if (v != null && v in 0.5f..2.0f) return v
+
+        val scale = resolve("比例") {
+            type.declaredMethods.filter {
+                !Modifier.isStatic(it.modifiers) && it.parameterTypes.isEmpty() && it.returnType == Float::class.javaPrimitiveType
             }
-        } catch (_: Throwable) {
         }
-        return 1.0f
+        val landscape = resolve("横屏") {
+            type.declaredFields.filter {
+                !Modifier.isStatic(it.modifiers) && Modifier.isFinal(it.modifiers) && it.type == Boolean::class.javaPrimitiveType
+            }
+        }
+        private val warned = HashSet<String>()
+        @Synchronized fun warn(label: String, t: Throwable) {
+            if (warned.add(label)) L.hookError("ToolbarInject.read ${type.name} $label", t)
+        }
+    }
+
+    private val members = HashMap<Class<*>, AdapterMembers>()
+    private fun members(adapter: Any) = synchronized(members) {
+        members.getOrPut(adapter.javaClass) { AdapterMembers(adapter.javaClass) }
+    }
+
+    private fun readAdapterScale(adapter: Any): Float {
+        val fields = members(adapter)
+        return try {
+            (fields.scale?.invoke(adapter) as? Float)?.takeIf { it in 0.5f..2.0f } ?: 1f
+        } catch (t: Throwable) {
+            fields.warn("比例", t)
+            1f
+        }
     }
 
     private fun isAdapterLandscape(adapter: Any, ctx: Context): Boolean {
+        val fields = members(adapter)
         try {
-            val f = adapter.javaClass.declaredFields.firstOrNull {
-                !Modifier.isStatic(it.modifiers) &&
-                    Modifier.isFinal(it.modifiers) &&
-                    it.type == Boolean::class.javaPrimitiveType
-            }
-            if (f != null) {
-                f.isAccessible = true
-                return f.getBoolean(adapter)
-            }
-        } catch (_: Throwable) {
+            fields.landscape?.let { return it.getBoolean(adapter) }
+        } catch (t: Throwable) {
+            fields.warn("横屏", t)
         }
         return ctx.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     }

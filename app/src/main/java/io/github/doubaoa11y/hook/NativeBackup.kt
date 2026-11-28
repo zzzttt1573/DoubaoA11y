@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import io.github.doubaoa11y.ConfigSpec
+import io.github.doubaoa11y.NativeRestoreFiles
 import io.github.doubaoa11y.SettingsProvider
 import org.json.JSONArray
 import org.json.JSONObject
@@ -14,7 +15,6 @@ import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.io.RandomAccessFile
 import java.security.MessageDigest
 import java.util.Locale
 import java.util.zip.ZipEntry
@@ -36,11 +36,11 @@ object NativeBackup {
     private const val PENDING_DIR = "doubaoa11y_pending_restore"
     private const val PAYLOAD_DIR = "payload"
     private const val READY_FILE = "restore.ready"
+    private const val WORK_DIR = "doubaoa11y_restore_work"
     private const val ROLLBACK_DIR = "doubaoa11y_restore_rollback"
-    private const val LOCK_FILE = "doubaoa11y_restore.lock"
     private const val STATUS_FILE = "doubaoa11y_restore_status.json"
 
-    private const val MAX_FILES = 512
+    private const val MAX_FILES = NativeRestoreFiles.FILE_LIMIT
     private const val MAX_SINGLE_BYTES = 16L * 1024 * 1024
     private const val MAX_TOTAL_BYTES = 64L * 1024 * 1024
 
@@ -122,24 +122,20 @@ object NativeBackup {
         val filesDir = File(dataDir, "files")
         val pendingDir = File(filesDir, PENDING_DIR)
         val readyFile = File(pendingDir, READY_FILE)
-        if (!readyFile.isFile) {
-            earlyChecked = true
-            return
-        }
         filesDir.mkdirs()
-        val lockFile = File(filesDir, LOCK_FILE)
         try {
-            RandomAccessFile(lockFile, "rw").use { raf ->
-                raf.channel.lock().use {
-                    if (!readyFile.isFile) {
-                        earlyChecked = true
-                        return
-                    }
+            NativeRestoreFiles.withPending(pendingDir) {
+                if (!earlyChecked) {
+                    // 此专用目录只保存尚未发布或已结束的事务，持锁期间可安全清理。
+                    val work = File(filesDir, WORK_DIR)
+                    if (work.exists() && !work.deleteRecursively()) Log.w(TAG, "未能清理旧事务临时文件")
+                }
+                if (!earlyChecked && (readyFile.isFile || File(filesDir, ROLLBACK_DIR).exists())) {
                     Log.i(TAG, "检测到挂起的豆包原生设置恢复包，开始冷启动原子恢复")
                     val status = executeStagedRestore(dataDir, pendingDir, filesDir)
                     writeStatus(filesDir, status)
-                    earlyChecked = true
                 }
+                earlyChecked = true
             }
         } catch (t: Throwable) {
             Log.e(TAG, "冷启动恢复原生设置异常", t)
@@ -166,6 +162,10 @@ object NativeBackup {
         val manifestFile = File(pendingDir, MANIFEST_NAME)
         val rollbackDir = File(filesDir, ROLLBACK_DIR)
 
+        if (rollbackDir.exists()) {
+            val recovered = finishTransaction(dataDir, pendingDir, rollbackDir)
+            if (!File(pendingDir, READY_FILE).isFile) return recovered
+        }
         if (!manifestFile.isFile || !payloadDir.isDirectory) {
             pendingDir.deleteRecursively()
             return JSONObject().apply {
@@ -175,7 +175,7 @@ object NativeBackup {
             }
         }
 
-        val manifest = JSONObject(manifestFile.readText(Charsets.UTF_8))
+        val manifest = JSONObject(manifestFile.inputStream().use { String(NativeRestoreFiles.readManifest(it), Charsets.UTF_8) })
         val entries = manifest.getJSONArray("files")
         val items = mutableListOf<Triple<String, String, Long>>()
         for (i in 0 until entries.length()) {
@@ -190,9 +190,6 @@ object NativeBackup {
             items.add(Triple(rel, sha, size))
         }
 
-        // 记录回滚项：目标路径 -> 回滚备份路径（若原目标不存在则为 null）
-        rollbackDir.deleteRecursively()
-        rollbackDir.mkdirs()
         val dirUnits = LinkedHashSet<String>()
         val fileUnits = LinkedHashSet<String>()
 
@@ -206,86 +203,103 @@ object NativeBackup {
             }
         }
 
-        val movedBackups = mutableListOf<Pair<File, File?>>()
-        try {
-            // 1. 先移走目录级原子单元（Keva repo / LevelDB）到 rollback
-            for (relDir in dirUnits) {
-                val target = File(dataDir, relDir)
-                if (target.exists()) {
-                    val backup = File(rollbackDir, relDir)
-                    movePath(target, backup)
-                    movedBackups.add(target to backup)
-                } else {
-                    movedBackups.add(target to null)
+        val units = LinkedHashSet(dirUnits)
+        units.addAll(fileUnits)
+        for (rel in fileUnits) {
+            if (rel.startsWith("databases/") && listOf("-wal", "-shm", "-journal").none { rel.endsWith(it) }) {
+                for (suffix in listOf("-wal", "-shm", "-journal")) {
+                    if (File(dataDir, rel + suffix).exists()) units.add(rel + suffix)
                 }
-            }
-
-            // 2. 再移走文件级单元（含数据库 WAL/SHM/Journal 残留）到 rollback
-            for (relFile in fileUnits) {
-                val target = File(dataDir, relFile)
-                if (target.exists()) {
-                    val backup = File(rollbackDir, relFile)
-                    movePath(target, backup)
-                    movedBackups.add(target to backup)
-                } else {
-                    movedBackups.add(target to null)
-                }
-                if (relFile.startsWith("databases/") && !relFile.endsWith("-wal") &&
-                    !relFile.endsWith("-shm") && !relFile.endsWith("-journal")
-                ) {
-                    for (suffix in listOf("-wal", "-shm", "-journal")) {
-                        val auxRel = "$relFile$suffix"
-                        val aux = File(dataDir, auxRel)
-                        if (aux.exists() && auxRel !in fileUnits) {
-                            val backup = File(rollbackDir, auxRel)
-                            movePath(aux, backup)
-                            movedBackups.add(aux to backup)
-                        }
-                    }
-                }
-            }
-
-            // 3. 写入全部新文件
-            for ((rel, _, _) in items) {
-                val src = File(payloadDir, rel)
-                val dst = File(dataDir, rel)
-                dst.parentFile?.mkdirs()
-                copyFile(src, dst)
-            }
-
-            // 4. 全部成功，清理暂存与回滚目录
-            pendingDir.deleteRecursively()
-            rollbackDir.deleteRecursively()
-
-            val srcVer = manifest.optString("doubaoVersionName", "")
-            val msg = "已成功恢复 ${items.size} 个豆包原生设置与词库文件" +
-                if (srcVer.isNotEmpty()) "（来自豆包 $srcVer）" else ""
-            Log.i(TAG, msg)
-            return JSONObject().apply {
-                put("ok", true)
-                put("timestamp", System.currentTimeMillis())
-                put("fileCount", items.size)
-                put("sourceVersion", srcVer)
-                put("message", msg)
-            }
-        } catch (t: Throwable) {
-            Log.e(TAG, "原子恢复失败，正在回滚原始文件", t)
-            for ((target, backup) in movedBackups.asReversed()) {
-                runCatching {
-                    target.deleteRecursively()
-                    if (backup != null && backup.exists()) {
-                        movePath(backup, target)
-                    }
-                }
-            }
-            pendingDir.deleteRecursively()
-            rollbackDir.deleteRecursively()
-            return JSONObject().apply {
-                put("ok", false)
-                put("timestamp", System.currentTimeMillis())
-                put("message", "恢复失败并已安全回滚：${t.message ?: t.javaClass.simpleName}")
             }
         }
+        val entriesToMove = JSONObject()
+        for (rel in units) {
+            val target = File(dataDir.canonicalFile, rel)
+            require(target.canonicalFile == target) { "原生目标路径包含符号链接：$rel" }
+            entriesToMove.put(rel, target.exists())
+        }
+        val journal = JSONObject().put("units", entriesToMove)
+            .put("ready", File(pendingDir, READY_FILE).readText())
+        val work = File(filesDir, WORK_DIR)
+        check(work.isDirectory || work.mkdir()) { "无法创建恢复工作目录" }
+        val prepared = java.nio.file.Files.createTempDirectory(work.toPath(), "init-").toFile()
+        try {
+            writeSynced(File(prepared, "journal.json"), journal.toString())
+            atomicMove(prepared, rollbackDir)
+        } finally {
+            prepared.deleteRecursively()
+        }
+        try {
+            for (rel in units) {
+                if (entriesToMove.getBoolean(rel)) atomicMove(File(dataDir, rel), File(rollbackDir, rel))
+            }
+            for ((rel, _, _) in items) copyFile(File(payloadDir, rel), File(dataDir, rel))
+            // 所有新文件写完后才发布提交标记，标记存在即可安全清理旧件。
+            check(File(rollbackDir, "committed").createNewFile()) { "无法记录恢复提交状态" }
+        } catch (failure: Throwable) {
+            Log.e(TAG, "原生设置恢复中断", failure)
+            return finishTransaction(dataDir, pendingDir, rollbackDir)
+                .put("message", "恢复失败，已回滚：" + failure.javaClass.simpleName)
+        }
+        return finishTransaction(dataDir, pendingDir, rollbackDir)
+            .put("fileCount", items.size).put("sourceVersion", manifest.optString("doubaoVersionName"))
+            .put("message", "已恢复 " + items.size + " 个豆包原生文件")
+    }
+
+    private fun finishTransaction(dataDir: File, pending: File, rollback: File): JSONObject {
+        val record = File(rollback, "journal.json")
+        check(record.isFile) { "发现缺少事务清单的旧回滚目录，已保留原件，请检查" }
+        val journal = JSONObject(record.readText(Charsets.UTF_8))
+        val committed = File(rollback, "committed").isFile
+        if (!committed) {
+            val units = journal.getJSONObject("units")
+            val failures = linkedMapOf<String, Exception>()
+            for (rel in units.keys()) {
+                val target = File(dataDir.canonicalFile, rel)
+                require(target.canonicalFile == target &&
+                    (isAllowedRestorePath(rel) || kevaRepoDirOf("$rel/member") == rel)) { "回滚路径无效，已保留原件" }
+                val original = File(rollback, rel)
+                try {
+                    if (original.exists()) {
+                        check(!target.exists() || target.deleteRecursively())
+                        atomicMove(original, target)
+                    } else if (!units.getBoolean(rel)) {
+                        check(!target.exists() || target.deleteRecursively())
+                    } else check(target.exists()) { "原件缺失" }
+                } catch (failure: Exception) {
+                    failures[rel] = failure
+                }
+            }
+            if (failures.isNotEmpty()) {
+                val error = IllegalStateException("回滚未完成，已保留原件：" + failures.keys.joinToString())
+                failures.values.forEach(error::addSuppressed)
+                throw error
+            }
+        }
+        // 若期间发布了新的暂存包，仅清理与本事务匹配的旧包。
+        val ready = File(pending, READY_FILE)
+        if (ready.isFile && ready.readText() == journal.getString("ready")) {
+            // 先移出固定入口，再清理，进程中断也不会二次执行。
+            retire(pending)
+        }
+        retire(rollback)
+        return JSONObject().put("ok", committed).put("timestamp", System.currentTimeMillis())
+            .put("message", if (committed) "原生恢复已提交" else "已回滚中断的原生恢复")
+    }
+
+    private fun retire(dir: File) {
+        val retired = File(File(dir.parentFile, WORK_DIR), "done-" + java.util.UUID.randomUUID())
+        atomicMove(dir, retired)
+        if (!retired.deleteRecursively()) Log.w(TAG, "已结束事务的临时目录清理失败")
+    }
+
+    private fun atomicMove(src: File, dst: File) {
+        dst.parentFile?.mkdirs()
+        java.nio.file.Files.move(src.toPath(), dst.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+    }
+
+    private fun writeSynced(file: File, text: String) {
+        file.outputStream().use { out -> out.write(text.toByteArray(Charsets.UTF_8)); out.fd.sync() }
     }
 
     /**
@@ -296,6 +310,7 @@ object NativeBackup {
         val collected = collectBackupFiles(dataDir, includeClipboard)
         if (collected.isEmpty()) error("未找到可备份的豆包原生设置文件")
 
+        require(collected.size <= MAX_FILES) { "原生文件超过 512 个，无法完整备份" }
         val pfd = openXferFd(ctx, xferUri, token, write = true)
             ?: error("无法打开模块中转写入通道")
 
@@ -305,16 +320,25 @@ object NativeBackup {
 
         pfd.use { fd ->
             ZipOutputStream(BufferedOutputStream(FileOutputStream(fd.fileDescriptor), 64 * 1024)).use { zos ->
+                val buffer = ByteArray(64 * 1024)
                 for ((rel, file) in collected) {
-                    if (!file.isFile) continue
-                    val size = file.length()
-                    if (size > MAX_SINGLE_BYTES) continue
-                    if (totalBytes + size > MAX_TOTAL_BYTES) break
-                    val sha = sha256Hex(file)
+                    require(file.isFile && isAllowedRestorePath(rel)) { "无法完整收录原生文件：$rel" }
+                    val md = MessageDigest.getInstance("SHA-256")
+                    var size = 0L
                     zos.putNextEntry(ZipEntry(rel).apply { time = file.lastModified() })
-                    FileInputStream(file).use { it.copyTo(zos, 64 * 1024) }
+                    file.inputStream().use { input ->
+                        while (true) {
+                            val n = input.read(buffer)
+                            if (n < 0) break
+                            size += n
+                            totalBytes += n
+                            require(size <= MAX_SINGLE_BYTES && totalBytes <= MAX_TOTAL_BYTES) { "原生文件超限，无法完整备份：$rel" }
+                            md.update(buffer, 0, n)
+                            zos.write(buffer, 0, n)
+                        }
+                    }
                     zos.closeEntry()
-                    totalBytes += size
+                    val sha = hex(md.digest())
                     manifestFiles.put(JSONObject().apply {
                         put("path", rel)
                         put("size", size)
@@ -322,6 +346,9 @@ object NativeBackup {
                     })
                 }
 
+                require(collectBackupFiles(dataDir, includeClipboard).map { it.first } == collected.map { it.first }) {
+                    "原生文件集合在导出期间变化，请重试"
+                }
                 val manifest = JSONObject().apply {
                     put("formatVersion", FORMAT_VERSION)
                     put("packageName", ConfigSpec.TARGET_PACKAGE)
@@ -336,7 +363,9 @@ object NativeBackup {
                 zos.putNextEntry(ZipEntry(MANIFEST_NAME))
                 zos.write(manifest.toString(2).toByteArray(Charsets.UTF_8))
                 zos.closeEntry()
+                zos.finish()
                 zos.flush()
+                require(fd.statSize in 1L..MAX_TOTAL_BYTES) { "原生 ZIP 超过 64 MB，无法完整备份" }
             }
         }
         return "已打包 ${manifestFiles.length()} 个豆包原生文件（${totalBytes / 1024} KB）"
@@ -349,40 +378,41 @@ object NativeBackup {
         val dataDir = resolveDataDir(ctx) ?: error("无法定位豆包数据目录")
         val filesDir = File(dataDir, "files")
         val pendingDir = File(filesDir, PENDING_DIR)
-        val payloadDir = File(pendingDir, PAYLOAD_DIR)
-        val readyFile = File(pendingDir, READY_FILE)
-
-        val pfd = openXferFd(ctx, xferUri, token, write = false)
-            ?: error("无法打开模块中转读取通道")
-
-        // 先清理旧暂存区
-        pendingDir.deleteRecursively()
-        payloadDir.mkdirs()
+        filesDir.mkdirs()
+        val staged = File(filesDir, "doubaoa11y_stage_" + java.util.UUID.randomUUID())
+        check(staged.mkdir()) { "无法创建暂存目录" }
+        val payloadDir = File(staged, PAYLOAD_DIR)
 
         try {
+            check(payloadDir.mkdir()) { "无法创建恢复数据目录" }
             var manifestBytes: ByteArray? = null
-            var fileCount = 0
+            val payloadNames = HashSet<String>()
             var totalBytes = 0L
 
+            val pfd = openXferFd(ctx, xferUri, token, write = false)
+                ?: error("无法打开模块中转读取通道")
             pfd.use { fd ->
                 ZipInputStream(BufferedInputStream(FileInputStream(fd.fileDescriptor), 64 * 1024)).use { zis ->
                     val buf = ByteArray(64 * 1024)
+                    var count = 0
                     while (true) {
                         val entry = zis.nextEntry ?: break
+                        require(++count <= NativeRestoreFiles.ENTRY_LIMIT) { "原生备份条目过多" }
                         if (entry.isDirectory) {
+                            require(zis.read() == -1) { "目录条目含有数据" }
                             zis.closeEntry()
                             continue
                         }
                         val name = entry.name
                         if (name == MANIFEST_NAME) {
-                            manifestBytes = zis.readBytes()
-                            require((manifestBytes?.size ?: 0) <= 2 * 1024 * 1024) { "manifest.json 过大" }
+                            require(manifestBytes == null) { "重复的 manifest.json" }
+                            manifestBytes = NativeRestoreFiles.readManifest(zis)
                             zis.closeEntry()
                             continue
                         }
                         require(isAllowedRestorePath(name)) { "备份包包含不允许恢复的路径：$name" }
-                        fileCount++
-                        require(fileCount <= MAX_FILES) { "备份包文件数量超过上限（$MAX_FILES）" }
+                        require(payloadNames.add(name)) { "备份包包含重复路径：$name" }
+                        require(payloadNames.size <= MAX_FILES) { "备份包文件数量超过上限（$MAX_FILES）" }
 
                         val outFile = File(payloadDir, name)
                         outFile.parentFile?.mkdirs()
@@ -416,19 +446,21 @@ object NativeBackup {
                 val expectedSha = obj.getString("sha256")
                 val expectedSize = obj.getLong("size")
                 require(isAllowedRestorePath(rel)) { "清单包含非法路径：$rel" }
+                require(payloadNames.remove(rel)) { "清单路径重复或缺少对应文件：$rel" }
                 val f = File(payloadDir, rel)
                 require(f.isFile) { "缺少备份文件：$rel" }
                 require(f.length() == expectedSize) { "文件大小校验失败：$rel" }
                 require(sha256Hex(f) == expectedSha) { "文件完整性校验失败：$rel" }
             }
 
-            File(pendingDir, MANIFEST_NAME).writeBytes(rawManifest)
-            readyFile.writeText(System.currentTimeMillis().toString(), Charsets.UTF_8)
+            require(payloadNames.isEmpty()) { "备份包包含清单以外的文件" }
+            File(staged, MANIFEST_NAME).writeBytes(rawManifest)
+            File(staged, READY_FILE).writeText(java.util.UUID.randomUUID().toString(), Charsets.UTF_8)
+            NativeRestoreFiles.publish(staged, pendingDir)
 
             return "已校验并暂存 ${entries.length()} 个豆包原生设置文件。请强行停止豆包输入法后重新弹出键盘，即可生效。"
-        } catch (t: Throwable) {
-            pendingDir.deleteRecursively()
-            throw t
+        } finally {
+            staged.deleteRecursively()
         }
     }
 
@@ -439,7 +471,13 @@ object NativeBackup {
         val dataDir = resolveDataDir(ctx) ?: return "无法定位豆包数据目录"
         val filesDir = File(dataDir, "files")
         val pendingReady = File(File(filesDir, PENDING_DIR), READY_FILE)
-        if (pendingReady.isFile) {
+        val hasPending = try {
+            filesDir.isDirectory && NativeRestoreFiles.withPending(pendingReady.parentFile!!) { pendingReady.isFile }
+        } catch (t: Throwable) {
+            Log.e(TAG, "读取暂存恢复状态失败", t)
+            return "无法读取暂存恢复状态。"
+        }
+        if (hasPending) {
             return "有待应用的豆包原生恢复包，请先强行停止豆包输入法并重新弹出键盘。"
         }
         val statusFile = File(filesDir, STATUS_FILE)
@@ -498,7 +536,9 @@ object NativeBackup {
         val kevaRepoRoot = File(dataDir, "files/keva/repo")
         kevaRepoRoot.listFiles()?.sortedBy { it.name }?.forEach { repoDir ->
             if (repoDir.isDirectory && shouldBackupKevaRepo(repoDir.name, includeClipboard)) {
-                repoDir.listFiles()?.sortedBy { it.name }?.forEach { f ->
+                val children = repoDir.listFiles() ?: error("无法完整读取 Keva 目录")
+                    children.sortedBy { it.name }.forEach { f ->
+                        require(!f.isDirectory) { "Keva 目录结构不受支持，无法完整备份" }
                     if (f.isFile && !isTransientLockOrTemp(f.name)) {
                         out["files/keva/repo/${repoDir.name}/${f.name}"] = f
                     }
@@ -577,8 +617,15 @@ object NativeBackup {
         out: MutableMap<String, File>,
         depth: Int
     ) {
-        if (depth > 3) return
-        dir.listFiles()?.sortedBy { it.name }?.forEach { f ->
+        val wholeUnit = prefix == "files/.dict/user/engine_storage.leveldb" ||
+            prefix.startsWith("files/.dict/user/engine_storage.leveldb/")
+        if (depth > 3) {
+            require(!wholeUnit) { "LevelDB 目录过深，无法完整备份" }
+            return
+        }
+        val children = dir.listFiles()
+        require(!wholeUnit || children != null) { "无法读取 LevelDB 目录" }
+        children?.sortedBy { it.name }?.forEach { f ->
             if (f.isDirectory) {
                 collectUserDictDir(f, "$prefix/${f.name}", out, depth + 1)
             } else {
@@ -676,7 +723,10 @@ object NativeBackup {
                 md.update(buf, 0, n)
             }
         }
-        val bytes = md.digest()
+        return hex(md.digest())
+    }
+
+    private fun hex(bytes: ByteArray): String {
         val sb = StringBuilder(bytes.size * 2)
         for (b in bytes) {
             val v = b.toInt() and 0xFF
@@ -686,31 +736,12 @@ object NativeBackup {
         return sb.toString()
     }
 
-    private fun movePath(src: File, dst: File) {
-        dst.parentFile?.mkdirs()
-        if (src.renameTo(dst)) return
-        if (src.isDirectory) {
-            copyDir(src, dst)
-            src.deleteRecursively()
-        } else {
-            copyFile(src, dst)
-            src.delete()
-        }
-    }
-
-    private fun copyDir(src: File, dst: File) {
-        dst.mkdirs()
-        src.listFiles()?.forEach { child ->
-            val target = File(dst, child.name)
-            if (child.isDirectory) copyDir(child, target) else copyFile(child, target)
-        }
-    }
-
     private fun copyFile(src: File, dst: File) {
         dst.parentFile?.mkdirs()
         FileInputStream(src).use { input ->
             FileOutputStream(dst).use { output ->
                 input.copyTo(output, 64 * 1024)
+                output.fd.sync()
             }
         }
     }

@@ -119,12 +119,15 @@ object TatansBridge {
 
     private fun canSeePackage(c: Context, pkg: String): Boolean {
         if (Build.SDK < 30) return true
-        return try {
+        packageVisibleCache[pkg]?.let { return it }
+        val visible = try {
             c.packageManager.getPackageInfo(pkg, 0)
             true
         } catch (_: Throwable) {
             false
         }
+        packageVisibleCache[pkg] = visible
+        return visible
     }
 
     private val conn = object : ServiceConnection {
@@ -156,10 +159,10 @@ object TatansBridge {
         try {
             val m = c.getSystemService(Context.ACCESSIBILITY_SERVICE) as AccessibilityManager
             am = m
-            // 换读屏、开关触摸浏览时重新判断
-            m.addAccessibilityStateChangeListener({ main.postDelayed({ refresh("读屏开关变化") }, 300) }, main)
-            m.addTouchExplorationStateChangeListener({ main.postDelayed({ refresh("触摸浏览变化") }, 300) }, main)
-            if (Build.SDK >= 33) m.addAccessibilityServicesStateChangeListener({ _ -> main.postDelayed({ refresh("读屏服务变化") }, 300) })
+            // 换读屏、开关触摸浏览时合并去抖重新判断
+            m.addAccessibilityStateChangeListener({ scheduleRefresh("读屏开关变化") }, main)
+            m.addTouchExplorationStateChangeListener({ scheduleRefresh("触摸浏览变化") }, main)
+            if (Build.SDK >= 33) m.addAccessibilityServicesStateChangeListener({ _ -> scheduleRefresh("读屏服务变化") })
         } catch (t: Throwable) {
             L.hookError("TatansBridge.init", t)
         }
@@ -172,12 +175,27 @@ object TatansBridge {
         }
     }
 
+    private var pendingRefreshWhy = ""
+    private val refreshRunner = Runnable { refresh(pendingRefreshWhy) }
+    private fun scheduleRefresh(why: String) {
+        pendingRefreshWhy = why
+        main.removeCallbacks(refreshRunner)
+        main.postDelayed(refreshRunner, 300)
+    }
+
     private object Build {
         val SDK = android.os.Build.VERSION.SDK_INT
     }
 
-    /** 这个包的读屏是不是正在运行 */
+    private val packageVisibleCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    /** 这个包的读屏是不是正在运行（热路径优先读 A11yState 已合并缓存，避免每次布局跨进程查） */
     private fun running(pkg: String): Boolean {
+        val cached = A11yState.enabledPackages
+        if (cached.isNotEmpty() || !A11yState.active) {
+            if (pkg in cached) return true
+            if (cached.isNotEmpty()) return false
+        }
         try {
             val list = am?.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
             if (list != null && list.any { it.resolveInfo?.serviceInfo?.packageName == pkg }) return true
@@ -246,8 +264,9 @@ object TatansBridge {
     private fun connectViaProxy(c: Context) {
         if (proxyConnecting || viaProxy) return
         proxyConnecting = true
-        val initSuppress = wantTatansSuppress()
-        val initRect = if (initSuppress) tatansFullRect(c, computeWant()) else computeWant()
+        val panelOpen = readerPanelOpen()
+        val initSuppress = wantTatansSuppress(panelOpen)
+        val initRect = if (initSuppress) tatansFullRect(c, computeWant(panelOpen)) else computeWant(panelOpen)
         worker().post {
             val res = try {
                 c.contentResolver.call(
@@ -345,15 +364,36 @@ object TatansBridge {
     }
 
     private var listenedRoot: View? = null
+    private var imeInputViewId = 0
+    @Volatile
+    private var lastKnownPanelOpen = false
+    private val layoutUpdateRunner = Runnable { update("布局变化") }
+    private val layoutListener = ViewTreeObserver.OnGlobalLayoutListener {
+        main.removeCallbacks(layoutUpdateRunner)
+        main.post(layoutUpdateRunner)
+    }
+
+    private fun unlisten() {
+        main.removeCallbacks(layoutUpdateRunner)
+        val root = listenedRoot ?: return
+        listenedRoot = null
+        try {
+            root.viewTreeObserver.removeOnGlobalLayoutListener(layoutListener)
+        } catch (t: Throwable) {
+            L.hookError("TatansBridge.unlisten", t)
+        }
+    }
 
     /** 键盘显示：按键盘区域设置穿透，布局变化时跟着更新 */
     fun onShown() {
         visible = true
         refresh("键盘显示")
-        val root = imeRoot() ?: return
+        val root = imeRoot()
         if (listenedRoot !== root) {
+            unlisten()
+            if (root == null) return
             try {
-                root.viewTreeObserver.addOnGlobalLayoutListener(ViewTreeObserver.OnGlobalLayoutListener { update("布局变化") })
+                root.viewTreeObserver.addOnGlobalLayoutListener(layoutListener)
                 listenedRoot = root
             } catch (t: Throwable) {
                 L.hookError("TatansBridge.listen", t)
@@ -363,6 +403,7 @@ object TatansBridge {
     }
 
     fun onHidden() {
+        unlisten()
         visible = false
         readerEventsSuppressed = false
         send(Rect(), "键盘收起", suppress = false)
@@ -376,10 +417,17 @@ object TatansBridge {
     }
 
     /** 读屏焦点界面开着时不穿透（这些界面要用读屏焦点浏览） */
-    private fun readerPanelOpen(): Boolean =
-        CustomToolbar.editing() || imeRoot()?.let { Panels.find(it) } != null
+    private fun readerPanelOpen(): Boolean {
+        val open = CustomToolbar.editing() || imeRoot()?.let { Panels.find(it) } != null
+        lastKnownPanelOpen = open
+        return open
+    }
 
     fun panelOpen(): Boolean = try { readerPanelOpen() } catch (_: Throwable) { false }
+
+    /** ACTION_MOVE 热路径使用：结合布局更新缓存与活跃面板引用，避免每次移动全树 DFS */
+    fun panelOpenFast(): Boolean = lastKnownPanelOpen || CustomToolbar.editing() || Panels.active() != null
+
     fun clearPassThrough(why: String) {
         readerEventsSuppressed = false
         if ((remote != null || viaProxy) && (!current.isEmpty || currentSuppressed)) {
@@ -388,9 +436,9 @@ object TatansBridge {
     }
 
     /** 天坦读屏在全屏且整屏穿透时启用 16/8192 事件屏蔽（面板打开、双击键盘或退出全屏立刻解除） */
-    private fun wantTatansSuppress(): Boolean =
+    private fun wantTatansSuppress(panelOpen: Boolean): Boolean =
         visible && FullscreenMode.active && FullscreenMode.wanted && A11yState.recording &&
-            VirtualKeys.keepFocus && !readerPanelOpen()
+            VirtualKeys.keepFocus && !panelOpen
 
     @Suppress("DEPRECATION")
     private fun tatansFullRect(c: Context?, fallback: Rect): Rect {
@@ -405,21 +453,21 @@ object TatansBridge {
         }
     }
 
-    private fun computeWant(): Rect {
+    private fun computeWant(panelOpen: Boolean): Rect {
         val want = Rect()
         // 双击输入时按键交给读屏焦点，不穿透
         val full = FullscreenMode.windowRect()
-        if (full != null && A11yState.recording && !readerPanelOpen()) {
+        if (full != null && A11yState.recording && !panelOpen) {
             want.set(full)
             if (!VirtualKeys.keepFocus) {
                 want.bottom = minOf(want.bottom, FullscreenMode.keyboardTopOnScreen())
                 if (want.isEmpty) want.setEmpty()
             }
-        } else if (visible && Config.b("tatansFast") && A11yState.active && VirtualKeys.enabled && VirtualKeys.keepFocus && !readerPanelOpen()) {
+        } else if (visible && Config.b("tatansFast") && A11yState.active && VirtualKeys.enabled && VirtualKeys.keepFocus && !panelOpen) {
             val root = imeRoot()
             val area = root?.let { r ->
-                val id = r.resources.getIdentifier("ime_inputview", "id", r.context.packageName)
-                if (id != 0) r.findViewById<View>(id) else null
+                if (imeInputViewId == 0) imeInputViewId = r.resources.getIdentifier("ime_inputview", "id", r.context.packageName)
+                if (imeInputViewId != 0) r.findViewById<View>(imeInputViewId) else null
             }
             if (area != null && area.isShown && area.width > 0 && area.height > 0) {
                 val loc = IntArray(2)
@@ -443,9 +491,10 @@ object TatansBridge {
         }
         if (!tatans && !talkman) return
         try {
-            val want = computeWant()
+            val panelOpen = readerPanelOpen()
+            val want = computeWant(panelOpen)
             if (tatans) {
-                val suppress = wantTatansSuppress()
+                val suppress = wantTatansSuppress(panelOpen)
                 val tatansWant = if (suppress) tatansFullRect(ctx, want) else want
                 if (tatansWant != current || suppress != currentSuppressed) {
                     send(tatansWant, why, suppress)

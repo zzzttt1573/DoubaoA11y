@@ -2,6 +2,8 @@ package io.github.doubaoa11y.ui
 
 import android.app.Activity
 import android.app.AlertDialog
+import io.github.doubaoa11y.patch.ApkPatcher
+import io.github.doubaoa11y.SettingsProvider
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -58,7 +60,6 @@ class SettingsActivity : Activity() {
         private set
     private var status: TextView? = null
     private var fixButton: Button? = null
-    private var patchEntryButton: Button? = null
     var pad = 0
         private set
     private var page = HOME
@@ -85,8 +86,7 @@ class SettingsActivity : Activity() {
         if (page == HOME) {
             val agreedBefore = Disclaimer.agreed(this)
             Disclaimer.showIfNeeded(this) { send(ConfigSpec.CMD_STATUS) }
-            if (agreedBefore) Updater.afterUpdate(this)
-            else prefs.edit().putInt("lastVersionCode", ConfigSpec.MODULE_VERSION_CODE).apply()
+            if (!agreedBefore) prefs.edit().putInt("lastVersionCode", ConfigSpec.MODULE_VERSION_CODE).apply()
         }
     }
 
@@ -107,6 +107,8 @@ class SettingsActivity : Activity() {
     }
 
     override fun onDestroy() {
+        pendingStatus = null
+        Updater.detach(this)
         AppStorage.detach(this)
         PatchWizardPage.detach(this)
         WordTransfer.detach(this)
@@ -212,12 +214,9 @@ class SettingsActivity : Activity() {
         root.addView(fix)
         root.addView(button("刷新模块状态") { send(ConfigSpec.CMD_STATUS) })
 
-        root.addView(button("检查更新") { Updater.check(this, st) })
-        patchEntryButton = entry(PATCH_WIZARD).also {
-            it.visibility = View.GONE
-            root.addView(it)
-        }
-
+        val progress = info("").apply { visibility = View.GONE }
+        root.addView(progress)
+        root.addView(button("检查更新") { Updater.check(this, progress) })
         root.addView(heading("设置"))
         for (p in listOf(INPUT, GESTURE, CANDIDATE, VOICE, STATE, BACKUP, SPONSOR, ADVANCED)) root.addView(entry(p))
 
@@ -228,56 +227,72 @@ class SettingsActivity : Activity() {
     }
 
     /** 首页状态下面的解决按钮：仅检测到模块异常、版本不匹配或读屏未开时出现 */
-    private fun showFix(label: String, showPatchEntry: Boolean = false, onClick: () -> Unit) {
+    private fun showFix(label: String, onClick: () -> Unit) {
         val b = fixButton ?: return
         b.text = label
         b.setOnClickListener { onClick() }
         b.visibility = View.VISIBLE
-        patchEntryButton?.visibility = if (showPatchEntry) View.VISIBLE else View.GONE
     }
 
     private fun hideFix() {
         fixButton?.visibility = View.GONE
-        patchEntryButton?.visibility = View.GONE
     }
 
-    /** 豆包里运行的模块版本和本应用不一样：多半是更新后没有强行停止豆包 */
-    private var staleWarned = false
+    internal fun openPatchWizard() {
+        startActivity(Intent(this, SettingsActivity::class.java).putExtra(EXTRA_PAGE, PATCH_WIZARD))
+    }
 
-    private fun checkResult(extras: Bundle?, doubaoStatus: io.github.doubaoa11y.patch.ApkPatcher.DoubaoStatus) {
-        val running = extras?.getInt("moduleVersion", -1) ?: -1
-        val active = extras?.getBoolean("active", true) ?: true
-        val localIntegrated = doubaoStatus.kind == io.github.doubaoa11y.patch.ApkPatcher.PatchKind.LOCAL_INTEGRATED
-        val mismatchEmbedded = localIntegrated && !doubaoStatus.embeddedModuleMatchesCurrent
+    private data class StatusReceipt(val ok: Boolean, val msg: String, val extras: Bundle?)
+    private var pendingStatus: StatusReceipt? = null
+    private var statusProbeRunning = false
+    private var lastReceipt = 0L
+
+    private fun refreshStatus(receipt: StatusReceipt, id: Long) {
+        if (id < lastReceipt) return
+        lastReceipt = id
+        pendingStatus = receipt
+        if (statusProbeRunning) return
+        statusProbeRunning = true
+        val app = applicationContext
+        val target = status
+        Thread {
+            val probe = runCatching { ApkPatcher.inspect(app) }
+            runOnUiThread {
+                statusProbeRunning = false
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                val latest = pendingStatus ?: return@runOnUiThread
+                pendingStatus = null
+                if (target !== status) {
+                    refreshStatus(latest, lastReceipt)
+                    return@runOnUiThread
+                }
+                probe.onSuccess { renderStatus(latest, it) }.onFailure {
+                    status?.append("\n豆包安装状态检测失败，请刷新重试。")
+                }
+            }
+        }.start()
+    }
+
+    private fun renderStatus(receipt: StatusReceipt, installed: ApkPatcher.DoubaoStatus) {
+        val integrated = installed.kind == ApkPatcher.PatchKind.LOCAL_INTEGRATED
+        val running = receipt.extras?.getInt("moduleVersion", -1) ?: -1
+        val mismatch = (integrated && !installed.embeddedModuleMatchesCurrent) ||
+            (receipt.ok && running >= 0 && running != ConfigSpec.MODULE_VERSION_CODE)
+        val fixLabel = if (integrated) "一键注入新模块" else "去强行停止豆包输入法"
+        val lead = if (mismatch) "注意：豆包输入法中的模块与当前安装版本不匹配，请点击“$fixLabel”。\n" else ""
+        val text = "${lead}当前版本 ${ConfigSpec.MODULE_VERSION_NAME}\n状态：${receipt.msg}"
+        status?.text = text
+        status?.announceForAccessibility(text)
         when {
-            running != ConfigSpec.MODULE_VERSION_CODE || mismatchEmbedded -> {
-                if (localIntegrated) {
-                    showFix("一键同步新版模块到豆包", showPatchEntry = false) {
-                        startActivity(Intent(this, SettingsActivity::class.java).putExtra(EXTRA_PAGE, PATCH_WIZARD))
-                    }
-                } else {
-                    showFix("去强行停止豆包输入法", showPatchEntry = true) { Updater.openDoubaoInfo(this) }
-                }
-                if (!staleWarned && !isFinishing && running != ConfigSpec.MODULE_VERSION_CODE) {
-                    staleWarned = true
-                    val msg = if (localIntegrated) {
-                        "豆包输入法里集成的模块与当前安装的不匹配。请点击“一键同步新版模块到豆包”直接覆盖更新。"
-                    } else {
-                        "豆包输入法里运行的还是旧版模块。请在豆包输入法的应用信息里点“强行停止”，再弹出一次键盘。"
-                    }
-                    status?.text = "当前版本 ${ConfigSpec.MODULE_VERSION_NAME}\n状态：$msg"
-                    if (!localIntegrated) Updater.forceStopDialog(this, "需要强行停止豆包输入法", msg)
-                }
-            }
-            !prefs.getBoolean("moduleOn", true) -> hideFix()
-            !active -> showFix("打开无障碍设置") {
-                try {
-                    startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-                } catch (_: Throwable) {
-                }
-            }
+            mismatch -> showFix(fixLabel) { if (integrated) openPatchWizard() else Updater.openDoubaoInfo(this) }
+            !receipt.ok && installed.kind in setOf(ApkPatcher.PatchKind.ORIGINAL, ApkPatcher.PatchKind.NOT_INSTALLED) ->
+                showFix("注入无障碍模块") { openPatchWizard() }
+            !receipt.ok -> showFix(fixLabel) { if (integrated) openPatchWizard() else Updater.openDoubaoInfo(this) }
+            prefs.getBoolean("moduleOn", true) && receipt.extras?.getBoolean("active", true) == false ->
+                showFix("打开无障碍设置") { runCatching { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) } }
             else -> hideFix()
         }
+        Updater.afterUpdate(this, integrated)
     }
 
     // ---------------- 高级 ----------------
@@ -586,26 +601,21 @@ class SettingsActivity : Activity() {
         for (item in ConfigSpec.items) intent.putExtra(item.key, prefs.getBoolean(item.key, item.default))
         for (item in ConfigSpec.intItems) intent.putExtra(item.key, prefs.getInt(item.key, item.default))
         for (item in ConfigSpec.strItems) intent.putExtra(item.key, prefs.getString(item.key, item.default) ?: item.default)
-        intent.putExtra(ConfigSpec.EXTRA_CUSTOM_WORDS, prefs.getString(PREF_WORDS, "") ?: "")
+        val words = prefs.getString(PREF_WORDS, "").orEmpty()
+        if (words.length > WordTransferFormat.MAX_CHARS) {
+            toast("自定义解释词超过容量，请调整后同步")
+            return
+        }
+        intent.putExtra(ConfigSpec.EXTRA_CUSTOM_WORDS, words)
         if (cmd != null) intent.putExtra(ConfigSpec.EXTRA_CMD, cmd)
+        val requestId = SettingsProvider.recordRequest(intent, prefs)
         try {
-            sendOrderedBroadcast(intent, null, object : BroadcastReceiver() {
+            applicationContext.sendOrderedBroadcast(intent, null, object : BroadcastReceiver() {
                 override fun onReceive(context: Context, i: Intent) {
                     val ok = resultCode == RESULT_OK && resultData != null
-                    if (ok) {
-                        val rx = getResultExtras(false)
-                        if (rx != null) {
-                            val ed = prefs.edit()
-                            var synced = false
-                            for (k in listOf("upperOperation") + ConfigSpec.TOOLBAR_TOGGLE_KEYS) {
-                                if (rx.containsKey("sync_$k")) {
-                                    ed.putBoolean(k, rx.getBoolean("sync_$k"))
-                                    synced = true
-                                }
-                            }
-                            if (synced) ed.apply()
-                        }
-                    }
+                    val extras = if (ok) getResultExtras(false) else null
+                    if (extras != null) SettingsProvider.applyReceipt(prefs, requestId, extras)
+                    if (isFinishing || isDestroyed) return
                     // 改开关时成功就不打扰，只在没送到时提示
                     if (cmd == null && ok) return
                     val msg = if (ok) {
@@ -615,37 +625,11 @@ class SettingsActivity : Activity() {
                             else -> resultData
                         }
                     } else {
-                        "模块没有生效。可能是还没修补豆包，或者没有弹出过输入法界面。请点击“注入无障碍模块”。或者在任意编辑框弹出一次输入法界面。"
+                        "未收到豆包输入法回执，请在任意编辑框弹出一次输入法后刷新。"
                     }
                     val st = status
                     if (st != null) {
-                        val doubaoStatus = io.github.doubaoa11y.patch.ApkPatcher.inspect(this@SettingsActivity)
-                        val integratedLine = if (
-                            doubaoStatus.kind == io.github.doubaoa11y.patch.ApkPatcher.PatchKind.LOCAL_INTEGRATED &&
-                            !doubaoStatus.embeddedModuleMatchesCurrent
-                        ) "\n集成模块：与当前安装的不匹配，请同步更新" else ""
-                        val fullMsg = "$msg$integratedLine"
-                        st.text = "当前版本 ${ConfigSpec.MODULE_VERSION_NAME}\n状态：$fullMsg"
-                        st.announceForAccessibility(fullMsg)
-                        if (ok) checkResult(getResultExtras(false), doubaoStatus)
-                        else {
-                            val kind = doubaoStatus.kind
-                            if (kind == io.github.doubaoa11y.patch.ApkPatcher.PatchKind.ORIGINAL ||
-                                kind == io.github.doubaoa11y.patch.ApkPatcher.PatchKind.NOT_INSTALLED
-                            ) {
-                                showFix("注入无障碍模块", showPatchEntry = false) {
-                                    startActivity(Intent(this@SettingsActivity, SettingsActivity::class.java).putExtra(EXTRA_PAGE, PATCH_WIZARD))
-                                }
-                            } else if (kind == io.github.doubaoa11y.patch.ApkPatcher.PatchKind.LOCAL_INTEGRATED &&
-                                !doubaoStatus.embeddedModuleMatchesCurrent
-                            ) {
-                                showFix("一键同步新版模块到豆包", showPatchEntry = false) {
-                                    startActivity(Intent(this@SettingsActivity, SettingsActivity::class.java).putExtra(EXTRA_PAGE, PATCH_WIZARD))
-                                }
-                            } else {
-                                showFix("去强行停止豆包输入法", showPatchEntry = true) { Updater.openDoubaoInfo(this@SettingsActivity) }
-                            }
-                        }
+                        refreshStatus(StatusReceipt(ok, msg.orEmpty(), extras), requestId)
                     } else if (ok && cmd != null) {
                         // 复制、保存日志这类命令：结果用对话框显示，读屏会读出来
                         if (!isFinishing) AlertDialog.Builder(this@SettingsActivity)
@@ -658,8 +642,7 @@ class SettingsActivity : Activity() {
                 }
             }, null, RESULT_CANCELED, null, null)
         } catch (t: Throwable) {
-            status?.text = "当前版本 ${ConfigSpec.MODULE_VERSION_NAME}\n状态：发送失败 ${t.message}"
-            patchEntryButton?.visibility = View.VISIBLE
+            if (status != null) refreshStatus(StatusReceipt(false, "发送失败：${t.message}", null), requestId)
         }
     }
 }

@@ -11,7 +11,6 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.widget.FrameLayout
-import io.github.doubaoa11y.ConfigSpec
 
 /**
  * 上半屏操作模式。
@@ -152,7 +151,7 @@ object FullscreenMode {
      * 两个条件都要：输入法视图显示着（isInputViewShown），窗口也是可见的。
      * 键盘收起、应用切到后台、模块设置页打开这些情况都返回 false。
      */
-    private fun keyboardShown(): Boolean {
+    internal fun keyboardShown(): Boolean {
         return try {
             val svc = ViewA11yHooks.service ?: return false
             if (!svc.isInputViewShown) return false
@@ -216,15 +215,15 @@ object FullscreenMode {
     }
 
     /** 量键盘位置、摆好手势层、请求重算触摸区域 */
-    private fun measure(why: String) {
+    private fun measure(why: String): Boolean {
         // 每量一次都先确认键盘还在：收起动画、切到别的应用时这里会直接退出，
         // 不会留下“已经不在全屏却还停着触摸浏览”的残留
         if (!keyboardShown()) {
             detach("键盘已收起（$why）")
-            return
+            return false
         }
-        val dv = decor ?: return
-        val l = layer ?: return
+        val dv = decor ?: return false
+        val l = layer ?: return false
         if (!dv.isAttachedToWindow || dv.height <= 0) {
             // 刚显示时窗口还没挂上去：等一下再看，别急着退出
             if (tries < 10) {
@@ -234,7 +233,7 @@ object FullscreenMode {
                 fail("窗口一直没挂上")
                 detach("窗口一直没挂上（$why）")
             }
-            return
+            return false
         }
         val h = dv.height
         if (h <= 0) {
@@ -245,37 +244,40 @@ object FullscreenMode {
                 fail("等不到窗口尺寸")
                 detach("等不到窗口尺寸")
             }
-            return
+            return false
         }
         tries = 0
-        winH = h
-        winW = dv.width
+        val width = dv.width
 
         // 窗口没满屏：自己补一次（豆包一般已经满了，这里是兜底）
         if (h < screenHeight(dv) * 0.72f) forceWindowFull()
 
         val top = keyboardTop(dv)
-        if (top > 0 && top < h) {
-            kbTop = top
-        } else if (kbTop <= 0 || kbTop >= h) {
-            kbTop = (h * 0.58f).toInt()
+        val nextTop = when {
+            top in 1 until h -> top
+            kbTop in 1 until h -> kbTop
+            else -> (h * 0.58f).toInt()
         }
 
         // 布局没变就别再请求布局：不然 onGlobalLayout → measure → requestLayout 会自激，
         // 一遍遍重排很费电
-        val key = "$winW/$winH/$kbTop"
-        if (key == lastLayoutKey) return
-        lastLayoutKey = key
+        val key = "$width/$h/$nextTop"
+        if (key == lastLayoutKey) return true
 
         val lp = l.layoutParams as? FrameLayout.LayoutParams
-        if (lp == null || lp.height != kbTop) {
+        if (lp == null || lp.height != nextTop) {
             try {
-                l.layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, kbTop, Gravity.TOP)
+                l.layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, nextTop, Gravity.TOP)
             } catch (t: Throwable) {
                 L.hookError("FullscreenMode.layoutLayer", t)
+                return false
             }
         }
 
+        winW = width
+        winH = h
+        kbTop = nextTop
+        lastLayoutKey = key
         val first = !active
         if (first) {
             active = true
@@ -295,6 +297,7 @@ object FullscreenMode {
         // 请求重新算一次 insets：改完区域才会把上半屏的触摸交给输入法
         requestInsets(dv)
         main.post { if (active) requestInsets(decor) }
+        return true
     }
 
     private fun screenHeight(v: View): Int = try {
@@ -356,16 +359,20 @@ object FullscreenMode {
     private fun watch(dv: ViewGroup) {
         if (listener != null) return
         try {
+            var warned = false
             val li = ViewTreeObserver.OnGlobalLayoutListener {
                 if (active) {
-                    measure("布局变化")
-                    // 豆包菜单、剪贴板这类界面要用读屏焦点，开合时临时把触摸浏览交回去
-                    TouchGuard.syncPanel()
-
-                    // 面板开合时把上半屏手势区藏起来/放回去
-                    syncPanelVisibility()
-
-
+                    try {
+                        if (measure("布局变化")) {
+                            TouchGuard.syncPanel()
+                            syncPanelVisibility()
+                        }
+                    } catch (t: Throwable) {
+                        if (!warned) {
+                            warned = true
+                            L.hookError("FullscreenMode.globalLayout", t)
+                        }
+                    }
                 }
             }
             dv.viewTreeObserver.addOnGlobalLayoutListener(li)
@@ -446,6 +453,7 @@ object FullscreenMode {
         VirtualKeys.cancelExplore()
         unwatch()
         val l = layer
+        l?.cancelTouch()
         layer = null
         if (l != null) {
             try {

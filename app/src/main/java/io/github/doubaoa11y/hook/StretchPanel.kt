@@ -25,28 +25,70 @@ import kotlin.math.roundToInt
 object StretchPanel {
     private val main = Handler(Looper.getMainLooper())
     private var panel: View? = null
+    private var panelMask: View? = null
     private var watched: View? = null
+    private var layoutListener: ViewTreeObserver.OnGlobalLayoutListener? = null
+    private class Drag(val target: View, val down: Long, var x: Float, var y: Float) {
+        var pressed = false
+    }
+    private var activeDrag: Drag? = null
     private var busy = false
+
+    private fun cancelDrag() {
+        val drag = activeDrag ?: return
+        activeDrag = null
+        busy = false
+        main.removeCallbacksAndMessages(drag)
+        if (drag.pressed && drag.target.isAttachedToWindow) {
+            try { send(drag.target, drag.down, MotionEvent.ACTION_CANCEL, drag.x, drag.y) }
+            catch (t: Throwable) { L.hookError("StretchPanel.cancel", t) }
+        }
+    }
+
+    private fun later(drag: Drag, delay: Long, action: () -> Unit) {
+        main.postAtTime({
+            if (activeDrag === drag) {
+                try { action() } catch (t: Throwable) {
+                    if (activeDrag === drag) cancelDrag()
+                    L.hookError("StretchPanel.drag", t)
+                }
+            }
+        }, drag, SystemClock.uptimeMillis() + delay)
+    }
 
     val isOpen: Boolean get() = panel?.isShown == true
 
+    private var maskId = 0
+
     private fun find(root: View, name: String): View? {
-        val id = root.resources.getIdentifier(name, "id", root.context.packageName)
+        val id = if (name == "keyboard_stretch_mask") {
+            if (maskId == 0) maskId = root.resources.getIdentifier(name, "id", root.context.packageName)
+            maskId
+        } else {
+            root.resources.getIdentifier(name, "id", root.context.packageName)
+        }
         return if (id != 0) root.findViewById(id) else null
     }
 
     /** 键盘显示后调用：盯着布局变化，调整界面出现就盖上按钮，消失就拿掉 */
     fun watch(root: View) {
         if (watched === root) return
+        layoutListener?.let { old ->
+            try { watched?.viewTreeObserver?.removeOnGlobalLayoutListener(old) }
+            catch (t: Throwable) { L.hookError("StretchPanel.unwatch", t) }
+        }
+        close()
         watched = root
         try {
-            root.viewTreeObserver.addOnGlobalLayoutListener(ViewTreeObserver.OnGlobalLayoutListener {
+            val listener = ViewTreeObserver.OnGlobalLayoutListener {
                 try {
-                    check(root)
+                    if (watched === root) check(root)
                 } catch (t: Throwable) {
                     L.hookError("StretchPanel.check", t)
                 }
-            })
+            }
+            root.viewTreeObserver.addOnGlobalLayoutListener(listener)
+            layoutListener = listener
         } catch (t: Throwable) {
             L.hookError("StretchPanel.watch", t)
         }
@@ -56,6 +98,7 @@ object StretchPanel {
         if (!VirtualKeys.enabled) return
         val mask = find(root, "keyboard_stretch_mask")
         val shown = mask != null && mask.isShown
+        if (panel != null && panelMask !== mask) close()
         if (shown && panel == null) open(root, mask!!)
         else if (!shown && panel != null) close()
     }
@@ -66,13 +109,16 @@ object StretchPanel {
         val v = build(root, container.context)
         container.addView(v, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         panel = v
+        panelMask = mask
         L.i("打开调整键盘按钮")
         Speaker.speak("调整键盘，${sizeText(root)}")
     }
 
     fun close() {
+        cancelDrag()
         val v = panel ?: return
         panel = null
+        panelMask = null
         try {
             (v.parent as? ViewGroup)?.removeView(v)
         } catch (t: Throwable) {
@@ -174,21 +220,25 @@ object StretchPanel {
     private fun click(root: View, name: String, done: String) {
         val b = find(root, name) ?: run { Speaker.speak("找不到按钮"); return }
         b.performClick()
-        main.postDelayed({ Speaker.speak("$done，${sizeText(root)}") }, 400)
+        main.postDelayed({
+            try { Speaker.speak("$done，${sizeText(root)}") }
+            catch (t: Throwable) { L.hookError("StretchPanel.click", t) }
+        }, 400)
     }
 
     /** 加宽、变窄：左右两边各拖一半 */
     private fun widen(root: View, dx: Float, done: String) {
         val half = dx / 2
         dragOnly(root, "stretch_left", -half, 0f) {
-            main.postDelayed({ drag(root, "stretch_right", half, 0f, done) }, 80)
+            busy = true
+            later(it, 80) { busy = false; drag(root, "stretch_right", half, 0f, done) }
         }
     }
 
     private fun drag(root: View, name: String, dx: Float, dy: Float, done: String) {
         val before = stretchView(root)?.let { screenRect(it) }
         dragOnly(root, name, dx, dy) {
-            main.postDelayed({
+            later(it, 300) {
                 try {
                     val after = stretchView(root)?.let { screenRect(it) }
                     val msg = if (before != null && after == before) "已到头" else "$done，${sizeText(root)}"
@@ -196,12 +246,12 @@ object StretchPanel {
                 } catch (t: Throwable) {
                     L.hookError("StretchPanel.after", t)
                 }
-            }, 300)
+            }
         }
     }
 
     /** 从把手中心拖动 (dx, dy)，事件直接送给调整界面（不经过盖在上面的按钮层） */
-    private fun dragOnly(root: View, name: String, dx: Float, dy: Float, then: () -> Unit) {
+    private fun dragOnly(root: View, name: String, dx: Float, dy: Float, then: (Drag) -> Unit) {
         val sv = stretchView(root) ?: run { Speaker.speak("找不到调整界面"); return }
         val h = find(root, name) ?: run { Speaker.speak("找不到把手"); return }
         val sl = screenRect(sv)
@@ -209,27 +259,31 @@ object StretchPanel {
         val x0 = hl.exactCenterX() - sl.left
         val y0 = hl.exactCenterY() - sl.top
         val down = SystemClock.uptimeMillis()
+        cancelDrag()
+        val drag = Drag(sv, down, x0, y0)
+        activeDrag = drag
         busy = true
-        send(sv, down, MotionEvent.ACTION_DOWN, x0, y0)
-        val steps = 10
-        for (i in 1..steps) {
-            main.postDelayed({
-                try {
-                    // 把手跟着移动，坐标按开始时的界面位置算，送前换算成现在的界面坐标
-                    val now = screenRect(sv)
-                    val x = x0 + dx * i / steps + (sl.left - now.left)
-                    val y = y0 + dy * i / steps + (sl.top - now.top)
-                    send(sv, down, MotionEvent.ACTION_MOVE, x, y)
-                    if (i == steps) {
-                        send(sv, down, MotionEvent.ACTION_UP, x, y)
+        try {
+            drag.pressed = true
+            send(sv, down, MotionEvent.ACTION_DOWN, x0, y0)
+            val steps = 10
+            for (i in 1..steps) later(drag, i * 20L) {
+                val now = screenRect(sv)
+                drag.x = x0 + dx * i / steps + (sl.left - now.left)
+                drag.y = y0 + dy * i / steps + (sl.top - now.top)
+                send(sv, down, MotionEvent.ACTION_MOVE, drag.x, drag.y)
+                if (i == steps && activeDrag === drag) {
+                    send(sv, down, MotionEvent.ACTION_UP, drag.x, drag.y)
+                    drag.pressed = false
+                    if (activeDrag === drag) {
                         busy = false
-                        then()
+                        then(drag)
                     }
-                } catch (t: Throwable) {
-                    busy = false
-                    L.hookError("StretchPanel.drag", t)
                 }
-            }, (i * 20).toLong())
+            }
+        } catch (t: Throwable) {
+            if (activeDrag === drag) cancelDrag()
+            L.hookError("StretchPanel.dragStart", t)
         }
     }
 

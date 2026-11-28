@@ -279,6 +279,16 @@ class GestureLayer(ctx: Context) : View(ctx) {
         main.removeCallbacks(twoTapExpireRunner)
     }
 
+    override fun onDetachedFromWindow() {
+        try {
+            cancelTouch()
+        } catch (t: Throwable) {
+            L.hookError("GestureLayer.detach", t)
+        } finally {
+            super.onDetachedFromWindow()
+        }
+    }
+
     /** 一次手势作废（手指划出了手势区、或者被别的层接管）：不执行、不留状态 */
     fun cancelTouch() {
         tracking = false
@@ -788,7 +798,7 @@ class GestureLayer(ctx: Context) : View(ctx) {
                 Sound.play("boundary")
                 Speaker.unmute()
                 if (Config.b("fsHaptic")) Haptic.tick(2)
-                Speaker.speak(GestureMap.failHint(action))
+                Speaker.speak(if (navOption && EditOptions.size == 0) "没有可用的编辑菜单项" else GestureMap.failHint(action))
             } else if (effectiveAction == ConfigSpec.ACT_VOICE && KeyboardOps.isVoiceActive()) {
                 // 启动语音由 Voice.onStart() 播放用户设置的“语音开始”提示声，不发双击/手势声以免覆盖
             } else if (double) {
