@@ -154,7 +154,15 @@ object EditActions {
      * 2. 把已排队的动作播报从兜底超时切换为短落地缓冲，避开与 8192/16 竞态打断；
      * 3. 发现选区被外部清空时及时退出选择态。
      */
+    /** 选区与光标实时缓存（由 onUpdateSelection 与自身 setSelection 同步，用于快速单步移光标免拷全文） */
+    @Volatile
+    private var lastSelStart = -1
+    @Volatile
+    private var lastSelEnd = -1
+
     fun onUpdateSelection(oldStart: Int, oldEnd: Int, newStart: Int, newEnd: Int) {
+        lastSelStart = newStart
+        lastSelEnd = newEnd
         if (!FullscreenMode.active && !selecting && pendingSpeech == null && pendingExtend == null) return
         try {
             val now = SystemClock.uptimeMillis()
@@ -430,6 +438,7 @@ object EditActions {
             }
             // 选择态已失效（残留）：往下走普通移动
         }
+        if (!selecting && tryFastStep(ic, dir)) return
         val s = cached ?: snapshot(ic) ?: run {
             // 拿不到文本快照（罕见）：退回方向键兜底，至少光标能动
             send(if (dir < 0) KeyEvent.KEYCODE_DPAD_LEFT else KeyEvent.KEYCODE_DPAD_RIGHT)
@@ -443,13 +452,67 @@ object EditActions {
             return
         }
         // setSelection 直接移动光标（选区收缩成一点）
-        ic.setSelection(s.offset + target, s.offset + target)
+        val absTarget = s.offset + target
+        ic.setSelection(absTarget, absTarget)
+        lastSelStart = absTarget
+        lastSelEnd = absTarget
         // 光标一动，应用自己会发“选区变了”，读屏立刻把那个字念出来；
         // 走语音库播报时先把读屏压一下，免得同一个字念两遍
         Speaker.hushReader()
         // 始终朗读光标前面的字符，汉字带单字解释（如“好，好坏的好”）；光标移到全文最开头时前面无字，报“已到开头”
         val seg = charBeforeCaret(s.text, target)
         speakCharMove(seg)
+    }
+
+    /**
+     * 快速按字移动路径：仅通过 getTextBeforeCursor/getTextAfterCursor 局部读取最多 16 个字符，
+     * 避免每次左右滑都通过 getExtractedText 跨进程拷贝整个编辑框全文。
+     * 命中边界（开头/结尾）或检测到光标缓存与局部文本不一致时返回 false，自动回退到完整 snapshot 路径。
+     */
+    private fun tryFastStep(ic: InputConnection, dir: Int): Boolean {
+        val pos = lastSelStart
+        if (pos < 0 || pos != lastSelEnd) return false
+        val window = 16
+        return try {
+            val before = ic.getTextBeforeCursor(window, 0)?.toString() ?: return false
+            // 一致性校验：若光标前不足 window 字，其长度必须与缓存绝对偏移一致，否则回退全量快照
+            if (before.length < window && before.length != pos) return false
+            if (dir < 0) {
+                if (before.isEmpty()) return false // 到开头边界，走完整 snapshot 播报边界文案
+                val prev = TextBoundaries.step(before, before.length, -1)
+                if (prev < 0 || prev >= before.length) return false
+                val stepLen = before.length - prev
+                val newPos = pos - stepLen
+                if (newPos < 0) return false
+                // 如果恰好退到 16 字窗口起点但绝对位置 > 0，无法确定光标前一个完整字，回退全量快照
+                if (prev == 0 && newPos > 0) return false
+                ic.setSelection(newPos, newPos)
+                lastSelStart = newPos
+                lastSelEnd = newPos
+                Speaker.hushReader()
+                val seg = if (newPos <= 0) CaretChar("已到开头", null, atStart = true)
+                else charBeforeCaret(before, prev)
+                speakCharMove(seg)
+                true
+            } else {
+                val after = ic.getTextAfterCursor(window, 0)?.toString() ?: return false
+                if (after.isEmpty()) return false // 到结尾边界，走完整 snapshot 播报边界文案
+                val next = TextBoundaries.step(after, 0, 1)
+                if (next <= 0 || next > after.length) return false
+                val newPos = pos + next
+                ic.setSelection(newPos, newPos)
+                lastSelStart = newPos
+                lastSelEnd = newPos
+                Speaker.hushReader()
+                val unit = after.substring(0, next)
+                val explain = cursorExplanation(unit, Config.b("fsCursorExplainWord"), Config.b("fsCursorExplainLetter"))
+                val full = if (explain != null) "${spokenUnit(unit)}，$explain" else spokenUnit(unit)
+                speakCharMove(CaretChar(full, explain, atStart = false))
+                true
+            }
+        } catch (_: Throwable) {
+            false
+        }
     }
 
     private data class CaretChar(
@@ -460,6 +523,8 @@ object EditActions {
 
     /** 换输入框、收起键盘时清掉，避免上一轮朗读或选区任务串到新输入框 */
     fun resetEcho() {
+        lastSelStart = -1
+        lastSelEnd = -1
         rapidMove.reset()
         pendingEcho = ""
         main.removeCallbacks(burstRunner)
