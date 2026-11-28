@@ -32,6 +32,11 @@ object A11yState {
     var readerPackage: String = ""
         private set
 
+    /** 已启用的无障碍服务包名集合（合并 AccessibilityManager 与 Secure 设置，供热路径零 IPC 读取） */
+    @Volatile
+    var enabledPackages: Set<String> = emptySet()
+        private set
+
     /**
      * 记录绘制和回调：只要读屏开着就记录（不管触摸探索）。
      * 用户手写、打字、语音时常会临时关掉触摸探索，键位表和日志不能因此断掉。
@@ -96,6 +101,15 @@ object A11yState {
         }
         val services = if (enabled) enabledServices(m) else emptyList()
         val setting = if (enabled) enabledServicesSetting() else null
+        val pkgs = HashSet<String>()
+        for (s in services) if (s.pkg.isNotEmpty()) pkgs.add(s.pkg)
+        if (!setting.isNullOrEmpty()) {
+            for (part in setting.split(':')) {
+                val slash = part.indexOf('/')
+                if (slash > 0) pkgs.add(part.substring(0, slash))
+            }
+        }
+        enabledPackages = pkgs
         val state = ReaderDetection.detect(enabled, touch, services, setting)
         readerPackage = state.readerPackage
         sysEnabled = state.readerOn

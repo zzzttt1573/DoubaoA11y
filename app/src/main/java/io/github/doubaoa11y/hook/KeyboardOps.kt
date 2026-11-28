@@ -528,37 +528,56 @@ object KeyboardOps {
         organizeDoneRunner = null
     }
 
-    private fun scheduleOrganizePoll(tok: Long) {
-        val runner = Runnable {
-            if (tok != organizeToken) return@Runnable
-            if (SystemClock.uptimeMillis() > organizeWatchUntil) {
-                cancelOrganizeWatch()
-                return@Runnable
-            }
-            val nowText = readEditorText()
-            val before = organizeBeforeText
-            if (nowText != null && before != null && nowText != before) {
-                organizeStartHintRunner?.let { main.removeCallbacks(it) }
-                organizeStartHintRunner = null
-                organizePollRunner = null
-                val done = Runnable {
-                    if (tok != organizeToken) return@Runnable
-                    organizeDoneRunner = null
-                    organizeWatchUntil = 0L
-                    val trimmed = nowText.trim()
-                    val msg = if (trimmed.isEmpty()) "整理完成" else "整理完成，$trimmed"
-                    L.i("智能整理完成，编辑框字数 ${before.length} → ${nowText.length}")
-                    Speaker.echo(msg)
-                }
-                organizeDoneRunner = done
-                // 留 90ms 让可能同时到达的工具栏提示或编辑框事件先落地
-                main.postDelayed(done, 90L)
-                return@Runnable
-            }
-            scheduleOrganizePoll(tok)
+    /** 当前是否正在等待智能整理结果（供 InputHooks / ServiceHooks 零开销快速判断） */
+    val isWatchingOrganize: Boolean get() = organizeWatchUntil > 0L
+
+    /** 编辑器发生文本或选区变化时提前唤醒智能整理核验，不等 1000ms 兜底轮询 */
+    fun onEditorTextMayHaveChanged() {
+        val tok = organizeToken
+        if (organizeWatchUntil <= 0L || organizeDoneRunner != null) return
+        if (SystemClock.uptimeMillis() > organizeWatchUntil) {
+            cancelOrganizeWatch()
+            return
         }
+        organizePollRunner?.let { main.removeCallbacks(it) }
+        val r = Runnable { checkOrganizeNow(tok) }
+        organizePollRunner = r
+        main.post(r)
+    }
+
+    private fun checkOrganizeNow(tok: Long) {
+        if (tok != organizeToken) return
+        if (SystemClock.uptimeMillis() > organizeWatchUntil) {
+            cancelOrganizeWatch()
+            return
+        }
+        val nowText = readEditorText()
+        val before = organizeBeforeText
+        if (nowText != null && before != null && nowText != before) {
+            organizeStartHintRunner?.let { main.removeCallbacks(it) }
+            organizeStartHintRunner = null
+            organizePollRunner = null
+            val done = Runnable {
+                if (tok != organizeToken) return@Runnable
+                organizeDoneRunner = null
+                organizeWatchUntil = 0L
+                val trimmed = nowText.trim()
+                val msg = if (trimmed.isEmpty()) "整理完成" else "整理完成，$trimmed"
+                L.i("智能整理完成，编辑框字数 ${before.length} → ${nowText.length}")
+                Speaker.echo(msg)
+            }
+            organizeDoneRunner = done
+            // 留 90ms 让可能同时到达的工具栏提示或编辑框事件先落地
+            main.postDelayed(done, 90L)
+            return
+        }
+        scheduleOrganizePoll(tok)
+    }
+
+    private fun scheduleOrganizePoll(tok: Long) {
+        val runner = Runnable { checkOrganizeNow(tok) }
         organizePollRunner = runner
-        main.postDelayed(runner, 350L)
+        main.postDelayed(runner, 1000L)
     }
 
     private fun readEditorText(): String? {

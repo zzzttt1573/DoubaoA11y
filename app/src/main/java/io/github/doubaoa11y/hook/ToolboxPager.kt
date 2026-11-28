@@ -184,16 +184,57 @@ object ToolboxPager {
         return best
     }
 
-    /** 豆包菜单刚打开：把读屏焦点放到第一个项目 */
+    /** 豆包菜单刚打开：布局就绪后立即把读屏焦点放到第一个项目（450ms 超时兜底） */
     fun focusIfOpened(root: View) {
-        main.postDelayed({
-            try {
-                val panel = findPanel(root) ?: return@postDelayed
-                if (panel.isShown) focusFirst(panel)
+        var done = false
+        var listener: android.view.ViewTreeObserver.OnGlobalLayoutListener? = null
+        var timeout: Runnable? = null
+        fun cleanup() {
+            done = true
+            timeout?.let { main.removeCallbacks(it) }
+            timeout = null
+            listener?.let { l ->
+                try {
+                    if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnGlobalLayoutListener(l)
+                } catch (_: Throwable) {
+                }
+            }
+            listener = null
+        }
+        fun tryFocus(): Boolean {
+            if (done) return true
+            return try {
+                val panel = findPanel(root) ?: return false
+                if (!panel.isShown || panel.width <= 0 || panel.height <= 0) return false
+                val item = firstItem(panel) ?: return false
+                cleanup()
+                item.performAccessibilityAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null)
+                true
             } catch (t: Throwable) {
                 L.hookError("ToolboxPager.focusIfOpened", t)
+                cleanup()
+                true
             }
-        }, 450)
+        }
+        if (tryFocus()) return
+        listener = android.view.ViewTreeObserver.OnGlobalLayoutListener { tryFocus() }
+        try {
+            root.viewTreeObserver.addOnGlobalLayoutListener(listener)
+        } catch (_: Throwable) {
+        }
+        timeout = Runnable {
+            try {
+                if (!done) {
+                    val panel = findPanel(root)
+                    if (panel != null && panel.isShown) focusFirst(panel)
+                }
+            } catch (t: Throwable) {
+                L.hookError("ToolboxPager.focusIfOpened", t)
+            } finally {
+                cleanup()
+            }
+        }
+        main.postDelayed(timeout!!, 450)
     }
 
     private fun findPanel(v: View): View? {

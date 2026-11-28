@@ -47,13 +47,24 @@ object Panels {
         "toolbar_clipboard_close", "toolbar_clipboard_smart_organize", "toolbar_clipboard_word_segmentation"
     )
 
+    private const val NO_ENTRY = ""
+    private val entryCache = java.util.WeakHashMap<android.content.res.Resources, android.util.SparseArray<String>>()
+
     private fun entryName(v: View): String? {
         val id = v.id
         if (id == View.NO_ID || id ushr 24 == 0) return null
-        return try {
-            v.resources.getResourceEntryName(id)
-        } catch (_: Throwable) {
-            null
+        val res = try { v.resources } catch (_: Throwable) { return null } ?: return null
+        synchronized(entryCache) {
+            val map = entryCache.getOrPut(res) { android.util.SparseArray() }
+            val cached = map.get(id)
+            if (cached != null) return if (cached === NO_ENTRY) null else cached
+            val name = try {
+                res.getResourceEntryName(id)
+            } catch (_: Throwable) {
+                null
+            }
+            map.put(id, name ?: NO_ENTRY)
+            return name
         }
     }
 

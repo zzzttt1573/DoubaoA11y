@@ -58,8 +58,15 @@ object StretchPanel {
 
     val isOpen: Boolean get() = panel?.isShown == true
 
+    private var maskId = 0
+
     private fun find(root: View, name: String): View? {
-        val id = root.resources.getIdentifier(name, "id", root.context.packageName)
+        val id = if (name == "keyboard_stretch_mask") {
+            if (maskId == 0) maskId = root.resources.getIdentifier(name, "id", root.context.packageName)
+            maskId
+        } else {
+            root.resources.getIdentifier(name, "id", root.context.packageName)
+        }
         return if (id != 0) root.findViewById(id) else null
     }
 

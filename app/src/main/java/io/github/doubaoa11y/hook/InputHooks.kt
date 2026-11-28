@@ -169,6 +169,7 @@ object InputHooks {
                     }
                     for (listener in commitListeners) try { listener() } catch (t: Throwable) { L.hookError("IC.commit", t) }
                     TypingEcho.successful(ic, name, value, p.getObjectExtra(SNAPSHOT) as? TypingEcho.Snapshot)
+                    if (KeyboardOps.isWatchingOrganize) KeyboardOps.onEditorTextMayHaveChanged()
                 }
                 "finishComposingText" -> {
                     for (listener in finishListeners) try { listener() } catch (t: Throwable) { L.hookError("IC.finish", t) }

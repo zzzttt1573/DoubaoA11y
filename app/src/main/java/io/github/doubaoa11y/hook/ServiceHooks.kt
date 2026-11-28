@@ -57,6 +57,7 @@ object ServiceHooks {
             if (oldSelStart != newSelStart || oldSelEnd != newSelEnd)
                 Candidates.onExternalSelection(candStart >= 0 && candEnd >= 0)
             EditActions.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd)
+            if (KeyboardOps.isWatchingOrganize) KeyboardOps.onEditorTextMayHaveChanged()
         }))
         installHideHooks(cl)
         Hooker.method(c, "onComputeInsets", arrayOf(android.inputmethodservice.InputMethodService.Insets::class.java),
