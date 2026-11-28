@@ -146,6 +146,8 @@ object ConfigSpec {
             "提示：关掉后手势照做，只是不读“已删除”“行尾”这类结果提示"),
         Item("fsSpeakChar", "移动光标时朗读字词", true, Group.FIXED,
             "提示：开启后移动光标会朗读字词，如遇到与读屏重复朗读时请关闭"),
+        Item("fsCursorExplainWord", "移动光标时解释字词", true, Group.GESTURE),
+        Item("fsCursorExplainLetter", "移动光标时解释英文字母", false, Group.GESTURE),
         Item("fsCandidateFirst", "有候选时优先操作候选", true, Group.FIXED,
             "提示：正在打拼音、候选栏里有候选时，单击或双击上屏候选，左右滑动切换候选；关掉后按下面每个手势配的动作执行"),
         // 调试
@@ -591,6 +593,12 @@ object ConfigSpec {
         // 手势灵敏度：滑动判定距离和双击窗口一起缩放（低=防误触，中=现在的手感，极速=轻轻一划就认）
         IntItem("gestureSensitivity", "手势灵敏度", 1, listOf(
             0 to "1（低）", 1 to "2（中）", 2 to "3（高）",
+        ), Group.GESTURE),
+        IntItem("fsBoundarySpeakMode", "光标位于开头或结尾时朗读方式", 1, listOf(
+            0 to "字数统计+编辑框内容",
+            1 to "编辑框内容+字数统计",
+            2 to "字数统计",
+            3 to "编辑框内容",
         ), Group.GESTURE),
         // 拖动时反复执行的间隔
         IntItem("fsDragMs", "拖动重复间隔", 300, (1..8).map { it * 100 to "0.$it 秒" }, Group.GESTURE),

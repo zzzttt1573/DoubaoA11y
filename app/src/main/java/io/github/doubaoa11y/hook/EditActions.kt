@@ -485,9 +485,30 @@ object EditActions {
         }
         val prev = TextBoundaries.step(text, p, -1)
         val unit = text.substring(prev, p)
-        val explain = CharWords.explainOnly(unit)
-        val full = if (explain != null) "$unit，$explain" else spokenUnit(unit)
+        val explain = cursorExplanation(unit, Config.b("fsCursorExplainWord"), Config.b("fsCursorExplainLetter"))
+        val full = if (explain != null) "${spokenUnit(unit)}，$explain" else spokenUnit(unit)
         return CaretChar(full, explain, atStart = false)
+    }
+
+    internal fun cursorExplanation(unit: String, explainWord: Boolean, explainLetter: Boolean): String? {
+        if (explainLetter && unit.length == 1) {
+            val ch = unit[0]
+            if (ch in 'A'..'Z' || ch in 'a'..'z') {
+                val index = (ch.uppercaseChar() - 'A') + 1
+                return "第${index}个英文字母"
+            }
+        }
+        if (explainWord) {
+            return CharWords.explainOnly(unit)
+        }
+        return null
+    }
+
+    internal fun formatBoundarySpeech(mode: Int, whole: String, count: Int): String = when (mode) {
+        0 -> if (whole.isEmpty()) "共${count}个字" else "共${count}个字，${whole}"
+        2 -> "共${count}个字"
+        3 -> whole.ifEmpty { "编辑框为空" }
+        else -> if (whole.isEmpty()) "共${count}个字" else "${whole}，共${count}个字"
     }
 
     /** 还没读出去的那一个字；快速连滑时被后来的覆盖，只留最后停留的那个 */
@@ -535,12 +556,12 @@ object EditActions {
         val now = SystemClock.uptimeMillis()
         main.removeCallbacks(burstRunner)
         if (rapidMove.record(now, info.full)) {
-            main.postDelayed(burstRunner, 180L)
+            main.postDelayed(burstRunner, 95L)
             return
         }
         val explain = info.explainOnly ?: return
-        val delay = if (A11yState.readerPackage == "com.nirenr.talkman" || A11yState.readerPackage.isEmpty()) 260L else 190L
-        scheduleAfterSelection(explain, isEcho = true, afterSelMs = delay, fallbackMs = delay + 90L)
+        val delay = if (A11yState.readerPackage == "com.nirenr.talkman" || A11yState.readerPackage.isEmpty()) 130L else 110L
+        scheduleAfterSelection(explain, isEcho = true, afterSelMs = delay, fallbackMs = delay + 50L)
     }
 
     // ---------------- 极速连滑漏读兜底 ----------------
@@ -574,9 +595,10 @@ object EditActions {
         }
         val whole = text.replace("\r\n", "").replace('\n', '，').trim()
         Speaker.unmute()
-        val msg = if (whole.isEmpty()) "共${n}个字" else "${whole}，共${n}个字"
+        val mode = Config.i("fsBoundarySpeakMode")
+        val msg = formatBoundarySpeech(mode, whole, n)
         Speaker.echo(msg)
-        L.i("光标到边界：${if (dir < 0) "开头" else "结尾"}（全文+字数），共 $n 个字")
+        L.i("光标到边界：${if (dir < 0) "开头" else "结尾"}（模式=$mode），共 $n 个字")
     }
 
     /** 光标所在的那一句 / 那一段（按用户配置的标点断句） */
