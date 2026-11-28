@@ -36,7 +36,8 @@ object ToolboxPager {
     /** 读屏自己让菜单翻页（滚动动作）：翻完把焦点放到新一页第一个项目 */
     fun afterScroll(v: View) {
         val panel = panelOf(v) ?: return
-        main.postDelayed({ Sound.play("scroll"); focusFirst(panel) }, 350)
+        Sound.play("scroll")
+        scheduleFocusFirst(panel, retryDelayMs = 120L)
     }
 
     private fun panelOf(v: View): View? {
@@ -124,12 +125,27 @@ object ToolboxPager {
             return false
         }
         L.i("工具箱翻到第 ${next + 1} 页")
-          Sound.play("scroll")
-        main.postDelayed({
-            prepare(panel)
-            focusFirst(panel)
-        }, 250)
+        Sound.play("scroll")
+        scheduleFocusFirst(panel, retryDelayMs = 80L)
         return true
+    }
+
+    private fun scheduleFocusFirst(panel: View, retryDelayMs: Long) {
+        panel.post {
+            try {
+                if (!panel.isShown) return@post
+                prepare(panel)
+                val item = firstItem(panel)
+                if (item != null && item.performAccessibilityAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null)) {
+                    return@post
+                }
+                main.postDelayed({
+                    if (panel.isShown) focusFirst(panel)
+                }, retryDelayMs)
+            } catch (t: Throwable) {
+                L.hookError("ToolboxPager.scheduleFocusFirst", t)
+            }
+        }
     }
 
     /** 聚焦当前页的第一个项目 */

@@ -114,7 +114,7 @@ object VirtualKeys {
             } catch (t: Throwable) {
                 L.hookError("VirtualKeys.onTableChanged", t)
             }
-        }, v, SystemClock.uptimeMillis() + 150)
+        }, v, SystemClock.uptimeMillis() + 48)
     }
 
     // ---------------- 无障碍节点 ----------------

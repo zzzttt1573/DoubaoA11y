@@ -145,6 +145,7 @@ object ViewA11yHooks {
                 val v = p.thisObject as View
                 val action = p.args[0] as Int
                 if (action == AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS) {
+                    Panels.onUserAccessibilityFocus(v)
                     ensureClipboardItemVisible(v)
                 }
                 if (ToolboxPager.inPanel(v)) {

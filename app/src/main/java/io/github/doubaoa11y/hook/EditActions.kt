@@ -519,7 +519,7 @@ object EditActions {
             }
             pendingEcho = info.full
             main.removeCallbacks(echoRunner)
-            main.postDelayed(echoRunner, 90)
+            main.postDelayed(echoRunner, 50)
             return
         }
         main.removeCallbacks(echoRunner)
@@ -1940,7 +1940,7 @@ object EditActions {
             }
             Speaker.speak("当前编辑框不支持粘贴")
             L.w("粘贴没生效：编辑框文字没变化，返回值=$ok")
-        }, if (round == 0) 110L else 260L)
+        }, if (round == 0) 55L else 260L)
     }
 
     /** 剪贴板里现在是什么（只用来判断复制有没有成功，读不到就当没有） */

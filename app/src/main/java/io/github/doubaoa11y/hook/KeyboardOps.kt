@@ -464,7 +464,7 @@ object KeyboardOps {
             Speaker.speak("正在智能整理")
         }
         organizeStartHintRunner = startHint
-        main.postDelayed(startHint, 120L)
+        main.postDelayed(startHint, 80L)
         if (before != null) {
             scheduleOrganizePoll(tok)
         }
@@ -542,8 +542,8 @@ object KeyboardOps {
                     Speaker.echo(msg)
                 }
                 organizeDoneRunner = done
-                // 留 140ms 让可能同时到达的工具栏提示或编辑框事件先落地
-                main.postDelayed(done, 140L)
+                // 留 90ms 让可能同时到达的工具栏提示或编辑框事件先落地
+                main.postDelayed(done, 90L)
                 return@Runnable
             }
             scheduleOrganizePoll(tok)

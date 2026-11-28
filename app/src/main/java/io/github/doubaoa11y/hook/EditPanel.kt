@@ -75,19 +75,25 @@ object EditPanel {
         return true
     }
 
-    /** 从菜单里打开：先点菜单的返回键把菜单关掉，再打开面板 */
+    /** 从菜单里打开：先点菜单的返回键把菜单关掉，工具箱一隐藏就立刻打开面板（不再死等 350 ms） */
     fun closeToolboxThenOpen() {
         val root = ViewA11yHooks.service?.window?.window?.decorView ?: return
         val id = root.resources.getIdentifier("btn_toolbox_back", "id", root.context.packageName)
         val back = if (id != 0) root.findViewById<View>(id) else null
         back?.performClick()
-        root.postDelayed({
+        fun tryOpen(attempt: Int) {
             try {
-                open()
+                val toolbox = Panels.find(root)?.takeIf { it.javaClass.simpleName == "ToolboxKeyboardView" && it.isShown }
+                if (toolbox == null || attempt >= 7) {
+                    open()
+                } else {
+                    root.postDelayed({ tryOpen(attempt + 1) }, 50L)
+                }
             } catch (t: Throwable) {
                 L.hookError("EditPanel.open", t)
             }
-        }, 350)
+        }
+        root.post { tryOpen(0) }
     }
 
     private val buttons = ArrayList<View>()

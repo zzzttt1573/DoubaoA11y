@@ -71,7 +71,7 @@ object KeyboardState {
         L.i("当前键盘：$name")
         if (!first) Sound.play("scroll")
         if (first || !speakOn) return
-        say(name, 60)
+        say(name, 30)
     }
 
     /** 键位表变化后检查 Shift 状态 */
@@ -104,7 +104,7 @@ object KeyboardState {
         }
         if (!speakOn || !Config.b("announceOnShow") || boardName.isEmpty()) return
         shownSaid = true
-        say(boardName, 300, onShow = true)
+        say(boardName, 100, onShow = true)
     }
 
     private var hideSaidAt = 0L

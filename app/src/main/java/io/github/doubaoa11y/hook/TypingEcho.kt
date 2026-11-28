@@ -98,7 +98,7 @@ object TypingEcho {
         if (!enabled || !deleteEchoOn || before == null || SystemClock.uptimeMillis() < suppressDeleteUntil) return
         if (deletion?.session != session || deletion?.connection !== ic) deletion = PendingDelete(session, ic, before)
         main.removeCallbacks(readDeletion)
-        main.postDelayed(readDeletion, 90)
+        main.postDelayed(readDeletion, 55)
     }
     private val readDeletion = Runnable {
         val pending = deletion ?: return@Runnable
