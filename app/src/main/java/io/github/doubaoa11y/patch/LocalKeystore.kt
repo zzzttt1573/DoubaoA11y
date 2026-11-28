@@ -80,10 +80,16 @@ object LocalKeystore {
             val verified = load(tmp)
             check(verified.certSha256.contentEquals(m.certSha256) &&
                 verified.privateKey.encoded.contentEquals(m.privateKey.encoded)) { "签名密钥回读验证失败" }
-            // 私有目录内硬链接原子创建；目标已存在时失败，不会替换已有身份。
-            java.nio.file.Files.createLink(file.toPath(), tmp.toPath())
+            // 私有目录同文件系统原子重命名（Android SELinux 禁止 untrusted_app 使用 Files.createLink 硬链接）；
+            // loadOrCreate 已加锁并校验目标不存在，此处再次确认不覆盖已有身份。
+            check(java.nio.file.Files.notExists(file.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                "已有本机签名密钥，拒绝覆盖"
+            }
+            if (!tmp.renameTo(file)) {
+                java.nio.file.Files.move(tmp.toPath(), file.toPath())
+            }
         } finally {
-            tmp.delete()
+            if (tmp.exists()) tmp.delete()
         }
     }
 

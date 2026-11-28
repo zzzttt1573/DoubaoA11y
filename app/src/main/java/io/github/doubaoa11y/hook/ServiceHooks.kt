@@ -287,6 +287,11 @@ object ServiceHooks {
                                 }
                             } catch (t: Throwable) {
                                 L.hookError("ServiceHooks.logCopy", t)
+                                if (ordered) {
+                                    pending.resultCode = Activity.RESULT_OK
+                                    pending.resultData = "复制日志失败：${t.message ?: t.javaClass.simpleName}"
+                                    pending.setResultExtras(extras)
+                                }
                             } finally {
                                 pending.finish()
                             }

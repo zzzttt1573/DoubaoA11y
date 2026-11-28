@@ -448,9 +448,33 @@ object LogStore {
         var runPart = if (run.length > runRoom) run.substring(run.length - runRoom) else run
         if (runPart.length < run.length) runPart = runPart.substringAfter('\n', runPart)
         val text = head + crashPart + runPart
-        val cm = app.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        cm.setPrimaryClip(ClipData.newPlainText("豆包无障碍日志", text))
+        writeClipboardOnMain(app, text)
         return "已复制最近的日志，共 ${text.length} 个字，可以直接粘贴发给作者。日志很长的话，用“保存日志文件”发完整的。" + offHint()
+    }
+
+    private fun writeClipboardOnMain(app: Context, text: String) {
+        val clip = ClipData.newPlainText("豆包无障碍日志", text)
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            val cm = app.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(clip)
+            return
+        }
+        var err: Throwable? = null
+        val latch = CountDownLatch(1)
+        Handler(android.os.Looper.getMainLooper()).post {
+            try {
+                val cm = app.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(clip)
+            } catch (t: Throwable) {
+                err = t
+            } finally {
+                latch.countDown()
+            }
+        }
+        if (!latch.await(3000L, TimeUnit.MILLISECONDS)) {
+            throw IllegalStateException("写入剪贴板超时")
+        }
+        err?.let { throw it }
     }
 
     /** 将完整日志写入模块中转文件，供设置页保存到“豆包输入法无障碍/日志”文件夹 */
