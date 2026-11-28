@@ -176,6 +176,9 @@ object Voice {
         sessionUntil = 0L
     }
 
+    /** 当前是否处于语音写入事务中（含录音结束后待 flush 或待确认的最终 commit） */
+    fun needsEchoSnapshot(): Boolean = inSession() || flushing || expectedFinalCommit != null
+
     /** 仅供成功回调并确认正文变化的统一回声路径调用。 */
     fun acceptSuccessfulWrite(text: String, commit: Boolean): Boolean {
         val expected = commit && expectedFinalCommit == text

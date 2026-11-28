@@ -15,6 +15,7 @@ object TypingEcho {
     private var deletion: PendingDelete? = null
     private var suppressDeleteUntil = 0L
     private var suppressInputUntil = 0L
+    private var suppressInputSyncDepth = 0
     data class Snapshot(val text: String, val selectionStart: Int = -1, val selectionEnd: Int = -1)
     private data class Composing(val start: Int, val inserted: String, val confirmedBody: String) {
         fun validIn(body: String): Boolean = body == confirmedBody && start >= 0 &&
@@ -29,6 +30,8 @@ object TypingEcho {
     private val deleteEchoOn: Boolean get() = suppressedByReader || (!Config.b("speakByReader") && Config.b("ttsDeleteEcho"))
     private val voiceEchoOn: Boolean get() = suppressedByReader || (!Config.b("speakByReader") && Config.b("ttsVoiceEcho"))
     fun observing(): Boolean = enabled && (inputEchoOn || deleteEchoOn || voiceEchoOn)
+    private fun inputSuppressed(): Boolean = suppressInputSyncDepth > 0 || SystemClock.uptimeMillis() < suppressInputUntil
+    private fun deleteSuppressed(): Boolean = SystemClock.uptimeMillis() < suppressDeleteUntil
     fun suppressDeleteFor(ms: Long = 220L) {
         suppressDeleteUntil = SystemClock.uptimeMillis() + ms
         deletion = null
@@ -37,8 +40,30 @@ object TypingEcho {
     fun suppressInputFor(ms: Long = 300L) {
         suppressInputUntil = SystemClock.uptimeMillis() + ms
     }
+    inline fun suppressingInput(block: () -> Unit) {
+        beginSuppressInputSync()
+        try {
+            block()
+        } finally {
+            endSuppressInputSync()
+        }
+    }
+    @PublishedApi internal fun beginSuppressInputSync() { suppressInputSyncDepth++ }
+    @PublishedApi internal fun endSuppressInputSync() { suppressInputSyncDepth = (suppressInputSyncDepth - 1).coerceAtLeast(0) }
+    fun snapshotForInput(ic: InputConnection): Snapshot? {
+        if (!enabled || inputSuppressed() || !InputPrivacy.mayRead()) return null
+        if (!inputEchoOn && !(voiceEchoOn && Voice.needsEchoSnapshot())) return null
+        return readSnapshot(ic)
+    }
+    fun snapshotForDelete(ic: InputConnection): Snapshot? {
+        if (!enabled || !deleteEchoOn || deleteSuppressed() || !InputPrivacy.mayRead()) return null
+        return readSnapshot(ic)
+    }
     fun snapshot(ic: InputConnection): Snapshot? {
         if (!observing() || !InputPrivacy.mayRead()) return null
+        return readSnapshot(ic)
+    }
+    private fun readSnapshot(ic: InputConnection): Snapshot? {
         return try {
             val request = ExtractedTextRequest().apply { hintMaxChars = 8192; hintMaxLines = 100 }
             val value = ic.getExtractedText(request, 0) ?: return null
@@ -50,7 +75,7 @@ object TypingEcho {
     fun reset() { session++; composing.clear(); deletion = null; suppressDeleteUntil = 0L; suppressInputUntil = 0L; main.removeCallbacks(readDeletion) }
     fun successful(ic: InputConnection, name: String, argument: String, before: Snapshot?) {
         if (!enabled || !InputPrivacy.mayRead()) return
-        if (SystemClock.uptimeMillis() < suppressInputUntil) return
+        if (inputSuppressed()) return
         if (name == "finishComposingText") {
             val value = composing.remove(ic) ?: return
             if (snapshot(ic)?.text?.let { value.validIn(it) } != true) return
@@ -78,15 +103,25 @@ object TypingEcho {
         if (Voice.acceptSuccessfulWrite(confirmed, name == "commitText")) return
         if (name == "commitText" && inputEchoOn) Speaker.echo(confirmed)
     }
+    private fun matchesReplaced(before: String, start: Int, end: Int, replacement: String, after: String): Boolean {
+        if (start < 0 || end < start || end > before.length) return false
+        val expectedLen = before.length - (end - start) + replacement.length
+        if (after.length != expectedLen) return false
+        if (start > 0 && !before.regionMatches(0, after, 0, start)) return false
+        if (replacement.isNotEmpty() && !after.regionMatches(start, replacement, 0, replacement.length)) return false
+        val tailLen = before.length - end
+        return tailLen <= 0 || before.regionMatches(end, after, start + replacement.length, tailLen)
+    }
+
     private fun confirmedComposition(before: Snapshot, after: Snapshot, argument: String,
         previous: Composing?, actualDelta: String): Composing {
         if (previous?.validIn(before.text) == true &&
-            before.text.replaceRange(previous.start, previous.start + previous.inserted.length, argument) == after.text)
+            matchesReplaced(before.text, previous.start, previous.start + previous.inserted.length, argument, after.text))
             return Composing(previous.start, argument, after.text)
         val start = minOf(before.selectionStart, before.selectionEnd)
         val end = maxOf(before.selectionStart, before.selectionEnd)
         if (start >= 0 && end <= before.text.length &&
-            before.text.replaceRange(start, end, argument) == after.text)
+            matchesReplaced(before.text, start, end, argument, after.text))
             return Composing(start, argument, after.text)
         // 无可验证的组字或选区位置时，只记实际新增的差异段。
         var at = 0

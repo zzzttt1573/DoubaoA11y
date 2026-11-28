@@ -48,12 +48,15 @@ object Sound {
     private var last = 0L
     private var lastEvent = ""
 
+    private val missingCustomSlots = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
     fun init(c: Context) {
         val app = c.applicationContext ?: c
         context = app
         worker.execute {
             try {
                 for (slot in SoundEngine.slots) materializeBuiltin(app, slot)
+                main.post { preloadBuiltins(app) }
                 syncCustomNow(app, force = false)
             } catch (t: Throwable) {
                 L.hookError("Sound.init", t)
@@ -61,8 +64,31 @@ object Sound {
         }
     }
 
+    private fun preloadBuiltins(c: Context) {
+        if (!Config.b("soundOn")) return
+        val wantUsage = if (Config.b("ttsA11yStream")) {
+            AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY
+        } else {
+            AudioAttributes.USAGE_MEDIA
+        }
+        try {
+            ensurePool(wantUsage)
+            val p = pool ?: return
+            for (slot in SoundEngine.slots) {
+                if (ids.containsKey(slot)) continue
+                val file = File(File(c.cacheDir, BUILTIN_CACHE_DIR), SoundEngine.assets[SoundEngine.slots.indexOf(slot)])
+                if (!file.isFile || file.length() <= 100L) continue
+                val loadedId = p.load(file.absolutePath, 1)
+                if (loadedId != 0) ids[slot] = loadedId
+            }
+        } catch (t: Throwable) {
+            L.hookError("Sound.preloadBuiltins", t)
+        }
+    }
+
     fun onConfigChanged() {
         val c = context ?: return
+        missingCustomSlots.clear()
         if (!A11yState.moduleOn || !Config.b("soundOn")) {
             stop()
             return
@@ -133,7 +159,11 @@ object Sound {
             return
         }
 
-        main.post { playBuiltin(request, c, fallbackSlot, wantUsage, volume) }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            playBuiltin(request, c, fallbackSlot, wantUsage, volume)
+        } else {
+            main.post { playBuiltin(request, c, fallbackSlot, wantUsage, volume) }
+        }
     }
 
     private fun selectedFor(c: Context, event: String): String {
@@ -189,6 +219,39 @@ object Sound {
         }
     }
 
+    private fun ensurePool(wantUsage: Int) {
+        if (pool != null && usage == wantUsage) return
+        pool?.release()
+        ids.clear()
+        ready.clear()
+        pending = null
+        usage = wantUsage
+        pool = SoundPool.Builder()
+            .setMaxStreams(1)
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(usage)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build(),
+            )
+            .build()
+            .also { current ->
+                current.setOnLoadCompleteListener { p, id, status ->
+                    main.post {
+                        if (pool === p && status == 0) {
+                            ready.add(id)
+                            pending?.takeIf { it.id == id && it.sequence == sequence }?.let { request ->
+                                pending = null
+                                if (SystemClock.uptimeMillis() - request.at < 600) {
+                                    stream = p.play(id, request.volume, request.volume, 1, 0, 1f)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+    }
+
     private fun playBuiltin(request: Long, c: Context, slot: String, wantUsage: Int, volume: Float) {
         if (request != sequence) return
         if (!A11yState.recording || !Config.b("soundOn")) {
@@ -197,37 +260,7 @@ object Sound {
         }
         try {
             stopNow()
-            if (pool == null || usage != wantUsage) {
-                pool?.release()
-                ids.clear()
-                ready.clear()
-                pending = null
-                usage = wantUsage
-                pool = SoundPool.Builder()
-                    .setMaxStreams(1)
-                    .setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setUsage(usage)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                            .build(),
-                    )
-                    .build()
-                    .also { current ->
-                        current.setOnLoadCompleteListener { p, id, status ->
-                            main.post {
-                                if (pool === p && status == 0) {
-                                    ready.add(id)
-                                    pending?.takeIf { it.id == id && it.sequence == sequence }?.let { request ->
-                                        pending = null
-                                        if (SystemClock.uptimeMillis() - request.at < 600) {
-                                            stream = p.play(id, request.volume, request.volume, 1, 0, 1f)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-            }
+            ensurePool(wantUsage)
             val p = pool ?: return
             val existingId = ids[slot]
             if (existingId != null) {
@@ -355,6 +388,7 @@ object Sound {
             needed.add(slot)
         }
         for (id in needed) {
+            if (!force && id in missingCustomSlots) continue
             val target = customFile(c, id)
             if (force || !target.isFile || target.length() <= 0L) {
                 fetchCustom(c, id)
@@ -367,7 +401,13 @@ object Sound {
         return try {
             val b = c.contentResolver.call(SettingsProvider.URI, "openSound", id, null) ?: return null
             @Suppress("DEPRECATION")
-            val pfd = b.getParcelable<ParcelFileDescriptor>("fd") ?: return null
+            val pfd = b.getParcelable<ParcelFileDescriptor>("fd")
+            if (pfd == null) {
+                // Provider 正常响应但确无此自定义文件：记为负缓存，配置变化时自动清空
+                missingCustomSlots.add(id)
+                return null
+            }
+            missingCustomSlots.remove(id)
             val target = customFile(c, id)
             target.parentFile?.mkdirs()
             val temp = File(target.parentFile, "$id.tmp")

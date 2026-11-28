@@ -16,10 +16,90 @@ object Speaker {
     private var muteUntil = 0L
     @Volatile private var ttsRequested = false
     @Volatile private var speakGen = 0L
+
+    private sealed class TtsCmd {
+        object Warmup : TtsCmd()
+        object Stop : TtsCmd()
+        class Speak(val text: String, val usePunct: Boolean, val gen: Long) : TtsCmd()
+    }
+
+    private val queueLock = Any()
+    private val pendingSpeaks = ArrayDeque<TtsCmd.Speak>()
+    private var pendingStop = false
+    private var pendingWarmup = false
+    private var workerRunning = false
+    private val ttsExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "DoubaoA11ySpeaker").apply { isDaemon = true }
+    }
+
+    private fun scheduleDrainLocked() {
+        if (workerRunning) return
+        workerRunning = true
+        ttsExecutor.execute { drainTtsQueue() }
+    }
+
+    private fun drainTtsQueue() {
+        while (true) {
+            val cmd: TtsCmd = synchronized(queueLock) {
+                when {
+                    pendingStop -> {
+                        pendingStop = false
+                        TtsCmd.Stop
+                    }
+                    pendingWarmup -> {
+                        pendingWarmup = false
+                        TtsCmd.Warmup
+                    }
+                    pendingSpeaks.isNotEmpty() -> pendingSpeaks.removeFirst()
+                    else -> {
+                        workerRunning = false
+                        return
+                    }
+                }
+            }
+            try {
+                when (cmd) {
+                    TtsCmd.Stop -> {
+                        if (ttsRequested) {
+                            try { ctx?.contentResolver?.call(io.github.doubaoa11y.SettingsProvider.URI, "stop", null, null) } catch (_: Throwable) { }
+                            ttsRequested = false
+                        }
+                    }
+                    TtsCmd.Warmup -> {
+                        if (A11yState.recording && !Config.b("speakByReader")) {
+                            ttsRequested = true
+                            try { ctx?.contentResolver?.call(io.github.doubaoa11y.SettingsProvider.URI, "warmup", null, null) } catch (_: Throwable) { }
+                        }
+                    }
+                    is TtsCmd.Speak -> {
+                        if (cmd.gen != speakGen) continue
+                        ttsRequested = true
+                        val spoken = if (cmd.usePunct) Names.punctuationText(cmd.text) else cmd.text
+                        val b = Bundle().apply { putString("text", spoken) }
+                        val ok = try {
+                            ctx?.contentResolver?.call(io.github.doubaoa11y.SettingsProvider.URI, "speak", null, b)?.getBoolean("accepted") == true
+                        } catch (t: Throwable) {
+                            L.hookError("Speaker.tts", t)
+                            false
+                        }
+                        if (ok || cmd.gen != speakGen) continue
+                        mainHandler.post {
+                            if (cmd.gen == speakGen) readerSay(cmd.text)
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                L.hookError("Speaker.drain", t)
+            }
+        }
+    }
+
     fun prepareTts() {
         if (!A11yState.recording || Config.b("speakByReader")) return
-        ttsRequested = true
-        try { ctx?.contentResolver?.call(io.github.doubaoa11y.SettingsProvider.URI, "warmup", null, null) } catch (_: Throwable) { }
+        synchronized(queueLock) {
+            pendingWarmup = true
+            scheduleDrainLocked()
+        }
     }
     fun init(c: Context) {
         ctx = c.applicationContext ?: c
@@ -31,21 +111,6 @@ object Speaker {
     fun readerWillSpeak(): Boolean = Config.b("speakByReader") && !TatansBridge.readerEventsSuppressed
     fun hushReader() { /* 不压制用户读屏，宿主应用的选区提示由读屏自身决定。 */ }
     fun echo(text: String) = speak(text)
-    /**
-     * 朗读队列。
-     *
-     * 实测：震动已经异步化（立刻返回），但 speak 还同步占主线程 280~390us，
-     * 表现就是「震动先到、TTS 慢半拍」。
-     *
-     * 这里把真正的发送动作丢到单线程队列：单线程保证「先摸的键先读完」的顺序，
-     * 队列容量 8 + 丢弃最旧：快速滑动时不会堆积成一长串迟到的朗读
-     * （那比漏读更难受），优先保证最近摸到的键。
-     */
-    private val speakQueue = java.util.concurrent.ThreadPoolExecutor(
-        1, 1, 0L, java.util.concurrent.TimeUnit.MILLISECONDS,
-        java.util.concurrent.ArrayBlockingQueue<Runnable>(8),
-        java.util.concurrent.ThreadPoolExecutor.DiscardOldestPolicy(),
-    )
 
     fun speak(text: String) {
         if (!A11yState.recording || text.isBlank() || SystemClock.uptimeMillis() < muteUntil) return
@@ -55,26 +120,13 @@ object Speaker {
             readerSay(text)
             return
         }
-        // 独立 TTS 需要跨进程 contentResolver.call，放到单线程队列异步执行
+        // 独立 TTS 需要跨进程 contentResolver.call，放到单线程串行队列异步执行；最多保留最近 8 条，永不丢弃 stop
         val usePunct = Config.b("ttsPunctuationNames")
-        val gen = speakGen
-        speakQueue.execute {
-            if (gen != speakGen) return@execute
-            try {
-                ttsRequested = true
-                val spoken = if (usePunct) Names.punctuationText(text) else text
-                val b = Bundle().apply { putString("text", spoken) }
-                val ok = try {
-                    ctx?.contentResolver?.call(io.github.doubaoa11y.SettingsProvider.URI, "speak", null, b)?.getBoolean("accepted") == true
-                } catch (t: Throwable) {
-                    L.hookError("Speaker.tts", t)
-                    false
-                }
-                if (ok || gen != speakGen) return@execute
-                readerSay(text)
-            } catch (t: Throwable) {
-                L.hookError("Speaker.speak", t)
-            }
+        synchronized(queueLock) {
+            val gen = speakGen
+            while (pendingSpeaks.size >= 8) pendingSpeaks.removeFirst()
+            pendingSpeaks.addLast(TtsCmd.Speak(text, usePunct, gen))
+            scheduleDrainLocked()
         }
     }
 
@@ -111,11 +163,13 @@ object Speaker {
         } catch (t: Throwable) { L.hookError("Speaker.reader", t) }
     }
     fun stop() {
-        speakGen++
-        speakQueue.queue.clear()
-        if (ttsRequested) {
-            try { ctx?.contentResolver?.call(io.github.doubaoa11y.SettingsProvider.URI, "stop", null, null) } catch (_: Throwable) { }
-            ttsRequested = false
+        synchronized(queueLock) {
+            speakGen++
+            pendingSpeaks.clear()
+            if (ttsRequested) {
+                pendingStop = true
+                scheduleDrainLocked()
+            }
         }
         val m = am ?: return
         try {

@@ -44,12 +44,26 @@ object EditOptions {
     /** 有字的时候只需要发现“被清空了”，慢一点省电省跨进程 */
     private const val WATCH_FULL_MS = 1200L
 
+    @Volatile
+    private var cachedEditOptionsRaw: String? = null
+    @Volatile
+    private var cachedEditOptionsParsed: List<Int> = emptyList()
+
+    private fun parsedEditOptions(): List<Int> {
+        val raw = Config.s(ConfigSpec.EDIT_OPTIONS_KEY)
+        if (raw == cachedEditOptionsRaw) return cachedEditOptionsParsed
+        val parsed = ConfigSpec.parseEditOptions(raw)
+        cachedEditOptionsRaw = raw
+        cachedEditOptionsParsed = parsed
+        return parsed
+    }
+
     private val ids: List<Int>
         get() = if (dynamicOpen) {
             ConfigSpec.EDIT_OPTIONS_DYNAMIC.map { it.second }.filter {
                 state.selected != false || it == ConfigSpec.ACT_DESELECT
             }
-        } else state.available(ConfigSpec.parseEditOptions(Config.s(ConfigSpec.EDIT_OPTIONS_KEY)))
+        } else state.available(parsedEditOptions())
 
     val size: Int get() = ids.size
     val editorEmpty: Boolean get() = state.empty == true

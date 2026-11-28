@@ -565,6 +565,7 @@ object EditActions {
     fun resetEcho() {
         lastSelStart = -1
         lastSelEnd = -1
+        lastCharEchoAt = 0L
         rapidMove.reset()
         pendingEcho = ""
         main.removeCallbacks(burstRunner)
@@ -618,6 +619,7 @@ object EditActions {
 
     /** 还没读出去的那一个字；快速连滑时被后来的覆盖，只留最后停留的那个 */
     private var pendingEcho = ""
+    private var lastCharEchoAt = 0L
 
     private val echoRunner = Runnable {
         val t = pendingEcho
@@ -627,7 +629,7 @@ object EditActions {
 
     /**
      * 移动光标后的单字朗读：
-     * - 独立 TTS / 天坦全屏屏蔽：读屏不念 8192，模块完整念“好，好坏的好”（90ms 防抖合并，无双读）；
+     * - 独立 TTS / 天坦全屏屏蔽：读屏不念 8192，模块完整念“好，好坏的好”（首步 0ms 立即播报，120ms 内连滑 50ms 合并）；
      * - 其他读屏（解说/保益/点明/TalkBack）走读屏播报时：
      *   1. 移到全文最开头（atStart）：读屏静默，由模块补报“已到开头”；
      *   2. 极速连滑（<=150ms）：读屏会因去抖/位差 >1 静默，停手 180ms 后由模块完整补念“好，好坏的好”；
@@ -637,7 +639,10 @@ object EditActions {
     private fun speakCharMove(info: CaretChar) {
         if (!Config.b("fsSpeakChar") || info.full.isEmpty()) return
         if (!Speaker.readerWillSpeak()) {
-            if (info.atStart) {
+            val now = SystemClock.uptimeMillis()
+            val rapid = lastCharEchoAt > 0L && now - lastCharEchoAt <= 120L
+            lastCharEchoAt = now
+            if (info.atStart || !rapid) {
                 main.removeCallbacks(echoRunner)
                 pendingEcho = ""
                 Speaker.speak(info.full)
@@ -1580,7 +1585,10 @@ object EditActions {
         val ic = ic() ?: return
         val s = snapshot(ic)
         if (s != null && deleteSelection(ic, s)) return
-        val before = charBefore()
+        val before = s?.let {
+            val p = it.indexOf(it.caret)
+            if (p <= 0) null else it.text.getOrNull(p - 1)
+        }
         if (s != null && s.text.isEmpty()) {
             Speaker.speak("编辑框为空")
             return
@@ -1601,7 +1609,10 @@ object EditActions {
     fun deleteRight() {
         val ic = ic() ?: return
         val s = snapshot(ic)
-        val after = charAfter()
+        val after = s?.let {
+            val p = it.indexOf(it.caret)
+            it.text.getOrNull(p)
+        }
         if (s != null && s.text.isEmpty()) {
             Speaker.speak("编辑框为空")
             return
@@ -1753,6 +1764,13 @@ object EditActions {
     /** 朗读选中的文字；没选中就读光标所在行 */
     fun readSelection() {
         val ic = ic() ?: return
+        if (!InputPrivacy.mayRead()) return
+        val sel = try { ic.getSelectedText(0)?.toString() } catch (_: Throwable) { null }
+        if (sel != null && sel.isNotEmpty()) {
+            val t = sel.trim()
+            if (t.isEmpty()) Speaker.speak("选中的是空白") else Speaker.speak("${t}，已选中")
+            return
+        }
         val s = snapshot(ic) ?: return
         if (!s.hasSelection) {
             readLine()
@@ -1835,7 +1853,9 @@ object EditActions {
         val n = s.text.length
         TypingEcho.suppressDeleteFor()
         ic.performContextMenuAction(android.R.id.selectAll)
-        ic.commitText("", 1)
+        TypingEcho.suppressingInput {
+            ic.commitText("", 1)
+        }
         speechGate.markSkipNext(SystemClock.uptimeMillis())
         val d = textChangeDelayMs()
         scheduleAfterSelection(GestureSpeechFormat.cleared(n), afterSelMs = d, fallbackMs = SelectionOverrideTiming.fallbackMs(d))
@@ -1946,13 +1966,15 @@ object EditActions {
 
     fun copy() {
         val ic = ic() ?: return
-        val s = snapshot(ic)
-        val selected = s?.let {
-            if (!it.hasSelection) "" else it.text.substring(
-                it.indexOf(minOf(it.start, it.end)).coerceIn(0, it.text.length),
-                it.indexOf(maxOf(it.start, it.end)).coerceIn(0, it.text.length),
-            )
-        } ?: ""
+        val selected = if (InputPrivacy.mayRead()) {
+            try { ic.getSelectedText(0)?.toString() } catch (_: Throwable) { null }
+                ?: snapshot(ic)?.let {
+                    if (!it.hasSelection) "" else it.text.substring(
+                        it.indexOf(minOf(it.start, it.end)).coerceIn(0, it.text.length),
+                        it.indexOf(maxOf(it.start, it.end)).coerceIn(0, it.text.length),
+                    )
+                }.orEmpty()
+        } else ""
         val ok = try {
             ic.performContextMenuAction(android.R.id.copy)
         } catch (t: Throwable) {
@@ -1960,10 +1982,16 @@ object EditActions {
             false
         }
         speechGate.markSkipNext(SystemClock.uptimeMillis())
+        if (ok) {
+            finishSelection()
+            val label = plainLabel(selected)
+            Speaker.speak(GestureSpeechFormat.copied(label, selected.length))
+            return
+        }
         main.postDelayed({
-            // 复制成功与否不看返回值：有的编辑框返回 false 但已经复制好了，看剪贴板里是不是这段
+            // 有的编辑框 performContextMenuAction 返回 false 但已经复制好了，延时检查剪贴板兜底
             val clip = clipboardText()
-            val copied = ok || (selected.isNotEmpty() && clip != null && (clip == selected || clip.contains(selected.take(40))))
+            val copied = selected.isNotEmpty() && clip != null && (clip == selected || clip.contains(selected.take(40)))
             if (copied) finishSelection()
             val label = plainLabel(selected)
             Speaker.speak(
@@ -1974,7 +2002,6 @@ object EditActions {
                 }
             )
         }, 100)
-        if (ok) finishSelection()
     }
 
     fun cut() {

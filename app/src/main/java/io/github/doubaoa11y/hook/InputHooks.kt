@@ -126,15 +126,22 @@ object InputHooks {
             if (depth != 0) return@SafeHook
             if (Config.b("logJni")) L.i(msg(p.args) + " 来源=" + caller())
             val ic = p.thisObject as? InputConnection
-            if (ic != null && (name == "commitText" || name == "setComposingText" || isDeletion(name, p.args))) {
-                p.setObjectExtra(SNAPSHOT, TypingEcho.snapshot(ic))
-            }
+            var intercepted = false
             try {
                 if (ic != null && Voice.intercept(name, ic, p.args)) {
                     p.setObjectExtra(INTERCEPTED, true)
                     p.result = true
+                    intercepted = true
                 }
             } catch (t: Throwable) { L.hookError("Voice.intercept", t) }
+            if (!intercepted && ic != null) {
+                val snap = when {
+                    name == "commitText" || name == "setComposingText" -> TypingEcho.snapshotForInput(ic)
+                    isDeletion(name, p.args) -> TypingEcho.snapshotForDelete(ic)
+                    else -> null
+                }
+                if (snap != null) p.setObjectExtra(SNAPSHOT, snap)
+            }
         }, after = { p ->
             if (p.getObjectExtra(ENTERED) != true) return@SafeHook
             val depths = mutationDepth.get()

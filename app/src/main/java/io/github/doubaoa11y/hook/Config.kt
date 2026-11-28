@@ -84,7 +84,8 @@ object Config {
                 if (isDirty(k)) setFromIme(ctx, k, values[k] ?: (ConfigSpec.defaults[k] ?: false))
             }
             if (isDirty("toolbarCustomOrder")) setStrFromIme(ctx, "toolbarCustomOrder", strs["toolbarCustomOrder"] ?: "")
-            val b = ctx.contentResolver.call(PULL_URI, "dump", null, null) ?: return false
+            val req = appliedWordsVer?.let { v -> android.os.Bundle().apply { putString("wordsVer", v) } }
+            val b = ctx.contentResolver.call(PULL_URI, "dump", null, req) ?: return false
             var changed = false
             val e = prefs?.edit()
             for (item in ConfigSpec.items) {
@@ -116,11 +117,13 @@ object Config {
                 }
                 e?.putString(item.key, v)
             }
-            b.getString(ConfigSpec.EXTRA_CUSTOM_WORDS)?.let { w ->
+            if (b.containsKey(ConfigSpec.EXTRA_CUSTOM_WORDS)) {
+                val w = b.getString(ConfigSpec.EXTRA_CUSTOM_WORDS).orEmpty()
                 if (words.applyWords(w)) {
                     e?.putString(ConfigSpec.EXTRA_CUSTOM_WORDS, w)
                     changed = true
                 }
+                appliedWordsVer = b.getString("wordsVer") ?: "${w.length}:${w.hashCode()}"
             }
             if (changed) {
                 e?.apply()
@@ -143,6 +146,8 @@ object Config {
 
     private var lastPull = 0L
     private val words = CustomWordState()
+    @Volatile
+    private var appliedWordsVer: String? = null
 
     /**
      * 把某个设置值写回设置页那一份（豆包进程里改的设置也要能持久）。
@@ -240,6 +245,7 @@ object Config {
 
     fun setCustomWords(s: String) {
         words.applyWords(s)
+        appliedWordsVer = "${s.length}:${s.hashCode()}"
         try {
             prefs?.edit()?.putString(ConfigSpec.EXTRA_CUSTOM_WORDS, s)?.apply()
         } catch (t: Throwable) {
