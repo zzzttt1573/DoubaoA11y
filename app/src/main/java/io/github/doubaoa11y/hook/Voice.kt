@@ -1,6 +1,5 @@
 package io.github.doubaoa11y.hook
 
-import android.media.AudioManager
 import android.media.AudioRecord
 import android.os.Handler
 import android.os.Looper

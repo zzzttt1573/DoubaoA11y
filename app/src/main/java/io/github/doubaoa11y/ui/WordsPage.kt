@@ -25,7 +25,7 @@ class WordsPage(private val act: SettingsActivity) {
     private class Row(val c: String, val builtIn: String?)
 
     private val builtIn: Map<String, String> = try {
-        CharWords.builtIn().entries.associate { it.key.toString() to it.value }
+        CharWords.builtIn()
     } catch (_: Throwable) {
         emptyMap()
     }

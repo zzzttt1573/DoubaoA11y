@@ -2,12 +2,14 @@ package io.github.doubaoa11y.hook
 
 /** 单字解释：“高” → “高，提高的高”。数据见 CharWordsData（以 NVDA 简体中文字符描述为主，jieba 词频表补充，避开同音词）。 */
 object CharWords {
-    private val map: Map<Char, String> by lazy {
-        val m = LinkedHashMap<Char, String>(16000)  // 按字频顺序，设置页列表也是这个顺序
+    private val map: Map<String, String> by lazy {
+        val m = LinkedHashMap<String, String>(16000)  // 按字频顺序，设置页列表也是这个顺序
         try {
             for (part in CharWordsData.parts) {
                 for (line in part.split('\n')) {
-                    if (line.length >= 2) m[line[0]] = line.substring(1)
+                    if (line.isEmpty()) continue
+                    val end = Character.charCount(line.codePointAt(0))
+                    if (end < line.length) m[line.substring(0, end)] = line.substring(end)
                 }
             }
         } catch (t: Throwable) {
@@ -17,16 +19,14 @@ object CharWords {
     }
 
     /** 自带的词表（设置页的“自定义解释词”也用它列出全部字） */
-    fun builtIn(): Map<Char, String> = map
+    fun builtIn(): Map<String, String> = map
 
     /** 先看用户自定义的，再看自带的 */
     private fun wordOf(ch: String): String? =
-        Config.customWords[ch] ?: if (ch.length == 1) map[ch[0]] else null
+        Config.customWords[ch] ?: map[ch]
 
     fun isHanCodePoint(cp: Int) = io.github.doubaoa11y.Han.isHanCodePoint(cp)
     fun isSingleHan(key: String) = io.github.doubaoa11y.Han.isSingleHan(key)
-
-    fun isCjk(c: Char): Boolean = isHanCodePoint(c.code)
 
     /** 将文本拆成完整 Unicode 码点单字列表 */
     fun splitHanChars(text: String): List<String>? {
@@ -76,18 +76,9 @@ object CharWords {
         return "${w}的$t"
     }
 
-    /** 单个汉字带字头解释：“好” → “好，好坏的好”；无解释或未开单字解释时返回 null */
-    fun explainWithChar(c: Char, force: Boolean = false): String? {
-        if (!isCjk(c) || (!force && !Config.b("charExplain"))) return null
-        val s = c.toString()
-        val w = wordOf(s) ?: return null
-        return "$s，${w}的$s"
-    }
-
     /** 仅返回单个汉字的解释部分：“好” → “好坏的好”；无解释或未开单字解释时返回 null */
-    fun explainOnly(c: Char, force: Boolean = false): String? {
-        if (!isCjk(c) || (!force && !Config.b("charExplain"))) return null
-        val s = c.toString()
+    fun explainOnly(s: String, force: Boolean = false): String? {
+        if (!isSingleHan(s) || (!force && !Config.b("charExplain"))) return null
         val w = wordOf(s) ?: return null
         return "${w}的$s"
     }

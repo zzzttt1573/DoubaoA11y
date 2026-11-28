@@ -11,7 +11,6 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.widget.FrameLayout
-import io.github.doubaoa11y.ConfigSpec
 
 /**
  * 上半屏操作模式。

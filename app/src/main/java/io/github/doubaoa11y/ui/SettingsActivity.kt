@@ -60,7 +60,6 @@ class SettingsActivity : Activity() {
         private set
     private var status: TextView? = null
     private var fixButton: Button? = null
-    private var patchEntryButton: Button? = null
     var pad = 0
         private set
     private var page = HOME
@@ -218,11 +217,6 @@ class SettingsActivity : Activity() {
         val progress = info("").apply { visibility = View.GONE }
         root.addView(progress)
         root.addView(button("检查更新") { Updater.check(this, progress) })
-        patchEntryButton = entry(PATCH_WIZARD).also {
-            it.visibility = View.GONE
-            root.addView(it)
-        }
-
         root.addView(heading("设置"))
         for (p in listOf(INPUT, GESTURE, CANDIDATE, VOICE, STATE, BACKUP, SPONSOR, ADVANCED)) root.addView(entry(p))
 
@@ -233,17 +227,15 @@ class SettingsActivity : Activity() {
     }
 
     /** 首页状态下面的解决按钮：仅检测到模块异常、版本不匹配或读屏未开时出现 */
-    private fun showFix(label: String, showPatchEntry: Boolean = false, onClick: () -> Unit) {
+    private fun showFix(label: String, onClick: () -> Unit) {
         val b = fixButton ?: return
         b.text = label
         b.setOnClickListener { onClick() }
         b.visibility = View.VISIBLE
-        patchEntryButton?.visibility = if (showPatchEntry) View.VISIBLE else View.GONE
     }
 
     private fun hideFix() {
         fixButton?.visibility = View.GONE
-        patchEntryButton?.visibility = View.GONE
     }
 
     internal fun openPatchWizard() {

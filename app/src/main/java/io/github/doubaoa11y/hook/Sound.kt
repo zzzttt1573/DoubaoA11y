@@ -8,7 +8,6 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
-import io.github.doubaoa11y.ConfigSpec
 import io.github.doubaoa11y.SettingsProvider
 import io.github.doubaoa11y.SoundEngine
 import io.github.doubaoa11y.ui.ZipBackup

@@ -76,15 +76,14 @@ public final class WordTransferCheck {
         try { F.plan(nearLimit,more,false); throw new AssertionError(); } catch(IllegalArgumentException expected){count++;}
         check(nearLimit.size()==772);
 
-        Map<Character,String> builtIn=CharWords.INSTANCE.builtIn();
+        Map<String,String> builtIn=CharWords.INSTANCE.builtIn();
         check(builtIn.size()>10000);
-        Map<String,String> all=new LinkedHashMap<>();
-        builtIn.forEach((key, value) -> all.put(key.toString(), value));
+        Map<String,String> all=new LinkedHashMap<>(builtIn);
         all.putAll(original);
         byte[] full=F.encode(all);
         check(F.parse(full).equals(all));
         check(full.length<=WordTransferFormat.MAX_BYTES && F.serialize(all).length()<=WordTransferFormat.MAX_CHARS);
-        check(builtIn.get('高').equals(CharWords.INSTANCE.builtIn().get('高')) && all.get("高").equals("提高"));
+        check(builtIn.get("高").equals(CharWords.INSTANCE.builtIn().get("高")) && all.get("高").equals("提高"));
         System.out.println("PASS "+count+" word format/merge checks; built-in "+builtIn.size()+" entries, full export "+full.length+" bytes");
     }
 }

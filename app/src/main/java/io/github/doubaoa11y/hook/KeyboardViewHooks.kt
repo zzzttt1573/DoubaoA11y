@@ -48,7 +48,6 @@ object KeyboardViewHooks {
     private val I = Int::class.javaPrimitiveType!!
     private val J = Long::class.javaPrimitiveType!!
     private val Z = Boolean::class.javaPrimitiveType!!
-    private val F = Float::class.javaPrimitiveType!!
 
     fun install(cl: ClassLoader) {
         val c = Hooker.findClass(CLS, cl) ?: return

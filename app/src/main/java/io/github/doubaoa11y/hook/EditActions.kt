@@ -313,7 +313,7 @@ object EditActions {
         val end = activeEnd
         clearSelectionState("键盘收起，收起前有选中=$hasSel")
         // 收起前编辑框还留着选区：顺手收成光标，不然重新展开又是一片蓝色高亮（用户反馈）
-        if (hasSel && ic != null) collapseSelection(ic, end, "键盘收起")
+        if (hasSel) collapseSelection(ic, end, "键盘收起")
     }
 
     /**
@@ -332,9 +332,6 @@ object EditActions {
             clearSelectionState("展开时发现选择态是残留的")
         }
     }
-
-    private val stops = charArrayOf('。', '！', '？', '；', '…', '\n', '．', '.', '!', '?', ';')
-    @Suppress("unused") private val unusedStops = stops  // 保留给未来句子边界兜底参考
 
     // ---------------- 天坦式光标移动 ----------------
     //
@@ -454,12 +451,8 @@ object EditActions {
         val atStart: Boolean,
     )
 
-    /** 上一次朗读过的字在文本里的位置（-1 = 还没念过） */
-    private var lastCharIdx = -1
-
-    /** 换输入框、收起键盘时清掉，免得下一个输入框拿旧的序号去比 */
+    /** 换输入框、收起键盘时清掉，避免上一轮朗读或选区任务串到新输入框 */
     fun resetEcho() {
-        lastCharIdx = -1
         rapidMove.reset()
         pendingEcho = ""
         main.removeCallbacks(burstRunner)
@@ -481,21 +474,15 @@ object EditActions {
         if (len == 0) return CaretChar("编辑框为空", null, atStart = true)
         val p = target.coerceIn(0, len)
         if (p <= 0) {
-            lastCharIdx = -1
             return CaretChar("已到开头", null, atStart = true)
         }
         val bi = BreakIterator.getCharacterInstance(Locale.getDefault())
         bi.setText(text)
         val prev = bi.preceding(p).let { if (it == BreakIterator.DONE || it < 0) (p - 1).coerceAtLeast(0) else it }
-        lastCharIdx = prev
         val unit = text.substring(prev, p)
-        if (unit.length == 1) {
-            val ch = unit[0]
-            val explain = CharWords.explainOnly(ch)
-            val full = if (explain != null) "$ch，$explain" else spoken(ch)
-            return CaretChar(full, explain, atStart = false)
-        }
-        return CaretChar(Names.spoken(unit), null, atStart = false)
+        val explain = CharWords.explainOnly(unit)
+        val full = if (explain != null) "$unit，$explain" else spokenUnit(unit)
+        return CaretChar(full, explain, atStart = false)
     }
 
     /** 还没读出去的那一个字；快速连滑时被后来的覆盖，只留最后停留的那个 */
@@ -551,29 +538,6 @@ object EditActions {
         scheduleAfterSelection(explain, isEcho = true, afterSelMs = delay, fallbackMs = delay + 90L)
     }
 
-    /**
-     * 读一段越过的字：单个标点/空白/换行读名字，多个字符全文朗读（不截断）。
-     * 关掉“移动光标时朗读字词”后不读，交给读屏决定。
-     */
-    private fun speakSegment(seg: String, force: Boolean = false) {
-        if (!Config.b("fsSpeakChar")) return
-        if (!force && Speaker.readerWillSpeak()) {
-            noteBurst(seg)
-            return
-        }
-        val t = seg.trim()
-        val text = if (t.isEmpty()) spoken(seg.firstOrNull()) else t
-        if (force) {
-            main.removeCallbacks(echoRunner)
-            pendingEcho = ""
-            scheduleAfterSelection(text)
-            return
-        }
-        pendingEcho = text
-        main.removeCallbacks(echoRunner)
-        main.postDelayed(echoRunner, 90)
-    }
-
     // ---------------- 极速连滑漏读兜底 ----------------
 
     private val rapidMove = RapidMoveDetector(maxGapMs = 150L)
@@ -586,19 +550,6 @@ object EditActions {
         }
     }
 
-    /**
-     * 记一次“读屏会自己念、模块先不念”的移动：
-     * - 正常节奏逐字滑动（相邻间隔 >150ms）：读屏每次 8192 都会稳定朗读，模块绝不插话；
-     * - 极速连滑（相邻间隔 <=150ms，落入读屏 100ms 去抖窗口导致位差 >1 被静默吞掉）：
-     *   停手 180ms 后只补念最后一格，避免用户什么都听不到。
-     */
-    private fun noteBurst(seg: String) {
-        val now = SystemClock.uptimeMillis()
-        main.removeCallbacks(burstRunner)
-        if (rapidMove.record(now, seg)) {
-            main.postDelayed(burstRunner, 180L)
-        }
-    }
 
     /**
      * 光标已经到了开头/结尾还继续滑：先完整念一遍正文，再报“共N个字”。
@@ -637,28 +588,6 @@ object EditActions {
         while (b < len && !isSentenceSymbol(text[b])) b++
         if (b < len) b++
         return text.substring(a, b).replace('\n', '，').trim()
-    }
-
-    /** 读一次移动后越过的字；拿不到就静默（读屏自己会读） */
-    private fun speakCharAfterMove(ic: InputConnection, dir: Int) {
-        val t = try {
-            if (dir > 0) ic.getTextBeforeCursor(1, 0) else ic.getTextAfterCursor(1, 0)
-        } catch (e: Throwable) {
-            null
-        }
-        val c = t?.toString()
-        // 到边界（拿不到字）时：只有编辑框一个字都没有才提示，有字就静默
-        if (c.isNullOrEmpty()) {
-            val empty = try {
-                val s = snapshot(ic)
-                s == null || s.text.isEmpty()
-            } catch (e: Throwable) {
-                false
-            }
-            if (empty) Speaker.speak(if (dir < 0) "已到开头" else "已到结尾")
-            return
-        }
-        Speaker.speak(spoken(c.firstOrNull()))
     }
 
     /** 方向键带 Shift（选择模式下扩选用） */
@@ -1172,6 +1101,8 @@ object EditActions {
         return true
     }
 
+    private fun spokenUnit(unit: String) = if (unit.length == 1) spoken(unit[0]) else Names.spoken(unit)
+
     private fun spoken(c: Char?): String = when (c) {
         null, '\u0000' -> "空"
         ' ' -> "空格"
@@ -1492,12 +1423,8 @@ object EditActions {
         var end = bi.next()
         while (end != BreakIterator.DONE) {
             val unit = raw.substring(start, end)
-            val piece = if (unit.length == 1) {
-                val ch = unit[0]
-                CharWords.explainWithChar(ch, force = true) ?: spoken(ch)
-            } else {
-                Names.spoken(unit)
-            }
+            val explain = CharWords.explainOnly(unit, force = true)
+            val piece = if (explain != null) "$unit，$explain" else spokenUnit(unit)
             if (piece.isNotEmpty()) parts.add(piece)
             start = end
             end = bi.next()

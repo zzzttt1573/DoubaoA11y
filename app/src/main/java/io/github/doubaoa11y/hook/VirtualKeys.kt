@@ -1059,15 +1059,6 @@ object VirtualKeys {
         }
     }
 
-    private fun isAncestor(a: View, b: View): Boolean {
-        var p = b.parent
-        while (p is View) {
-            if (p === a) return true
-            p = p.parent
-        }
-        return false
-    }
-
     /** 模块合成点击后这段时间里，被点的控件发出的点击、获得焦点事件不交给读屏（免得读屏响点击声、把焦点挪过去） */
     @Volatile
     var quietUntil = 0L

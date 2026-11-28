@@ -2,7 +2,6 @@ package io.github.doubaoa11y.hook
 
 import android.content.ClipboardManager
 import android.content.Context
-import io.github.doubaoa11y.ConfigSpec
 import org.json.JSONArray
 import java.io.File
 

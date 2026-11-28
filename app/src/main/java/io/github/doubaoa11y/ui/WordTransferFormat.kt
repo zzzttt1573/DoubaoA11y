@@ -11,7 +11,6 @@ object WordTransferFormat {
     const val MAX_CHARS = 200000
     private const val BOM = "\uFEFF"
 
-    fun isHanCodePoint(cp: Int) = io.github.doubaoa11y.Han.isHanCodePoint(cp)
     fun isSingleHan(key: String) = io.github.doubaoa11y.Han.isSingleHan(key)
 
     fun read(input: InputStream): Map<String, String> {

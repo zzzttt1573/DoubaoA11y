@@ -12,7 +12,6 @@ import android.widget.TextView
 import io.github.doubaoa11y.hook.CharWords
 import java.io.File
 import java.io.FileInputStream
-import java.io.FileOutputStream
 
 /** 只交换原格式解释词，不改变内置词库，也不自动读取任何读屏词库。 */
 object WordTransfer {
@@ -151,7 +150,7 @@ object WordTransfer {
         work(a, "正在导出解释词") {
             val words = LinkedHashMap<String, String>()
             if (exportAll) {
-                for ((ch, value) in CharWords.builtIn()) words[ch.toString()] = value
+                words.putAll(CharWords.builtIn())
             }
             words.putAll(custom)
             val bytes = WordTransferFormat.encode(words)

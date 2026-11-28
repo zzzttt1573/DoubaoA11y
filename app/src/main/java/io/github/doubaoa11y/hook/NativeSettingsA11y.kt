@@ -9,7 +9,6 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.CompoundButton
 import android.widget.TextView
 import de.robv.android.xposed.XposedHelpers
-import io.github.doubaoa11y.ConfigSpec
 import java.util.Collections
 import java.util.WeakHashMap
 
@@ -349,13 +348,14 @@ object NativeSettingsA11y {
             if (!stateFields.containsKey(cls)) {
                 stateFields[cls] = null
                 val named = XposedHelpers.findFieldIfExists(cls, "a")
-                val field = named?.takeIf { it.type == Boolean::class.javaPrimitiveType }
+                    ?.takeIf { it.type == Boolean::class.javaPrimitiveType }
+                val field = named
                     ?: cls.declaredFields.singleOrNull {
                         it.type == Boolean::class.javaPrimitiveType && !java.lang.reflect.Modifier.isStatic(it.modifiers)
                     }
                 field?.isAccessible = true
                 stateFields[cls] = field
-                if (named !== field || field == null) L.w("复选框状态字段降级 ${cls.name}：${field?.name ?: "未知"}")
+                if (named == null) L.w("复选框状态字段降级 ${cls.name}：${field?.name ?: "未知"}")
             }
             stateFields[cls]?.getBoolean(cb)
         } catch (t: Throwable) {
