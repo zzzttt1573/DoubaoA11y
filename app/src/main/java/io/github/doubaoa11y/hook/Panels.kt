@@ -31,11 +31,12 @@ object Panels {
     )
     private val main = Handler(Looper.getMainLooper())
     private var last: WeakReference<View>? = null
-    private var lastFocusedPanel: WeakReference<View>? = null
+    private var lastWasShown = false
     private var pendingFocusGen = 0L
     private var pendingLayoutView: WeakReference<View>? = null
     private var pendingLayoutListener: ViewTreeObserver.OnGlobalLayoutListener? = null
     private var pendingTimeoutRunner: Runnable? = null
+    private var pendingConfirmRunner: Runnable? = null
     private var autoFocusing = false
 
     private val excludedContentIds = setOf(
@@ -61,13 +62,14 @@ object Panels {
             entryName(v) in panelIds ||
             CustomToolbar.isPanel(v)
 
-    fun note(v: View) {
+    fun note(v: View, triggerFocus: Boolean = true) {
         val prev = last?.get()
-        if (prev !== v) {
-            last = WeakReference(v)
-            if (v.isShown && !CustomToolbar.isPanel(v) && lastFocusedPanel?.get() !== v) {
-                schedulePanelFocus(v)
-            }
+        val shown = v.isShown
+        val newlyShown = prev !== v || (!lastWasShown && shown)
+        last = WeakReference(v)
+        lastWasShown = shown
+        if (triggerFocus && newlyShown && shown && !CustomToolbar.isPanel(v)) {
+            schedulePanelFocus(v)
         }
     }
 
@@ -84,6 +86,8 @@ object Panels {
         pendingFocusGen++
         pendingTimeoutRunner?.let { main.removeCallbacks(it) }
         pendingTimeoutRunner = null
+        pendingConfirmRunner?.let { main.removeCallbacks(it) }
+        pendingConfirmRunner = null
         val lv = pendingLayoutView?.get()
         val li = pendingLayoutListener
         pendingLayoutView = null
@@ -96,7 +100,12 @@ object Panels {
         }
     }
 
-    fun active(): View? = last?.get()?.takeIf { it.isShown && it.width > 0 }
+    fun active(): View? {
+        val v = last?.get() ?: return null
+        if (v.isShown && v.width > 0) return v
+        lastWasShown = false
+        return null
+    }
 
     private fun isDescendant(v: View, ancestor: View): Boolean {
         var p: Any? = v
@@ -149,7 +158,7 @@ object Panels {
             if (gen != pendingFocusGen) return true
             val panel = find(root) ?: return false
             if (!panel.isShown) return false
-            note(panel)
+            note(panel, triggerFocus = false)
             TatansBridge.update("打开读屏面板")
             L.i("打开了 ${panel.javaClass.simpleName}，交给读屏")
             schedulePanelFocus(panel)
@@ -187,23 +196,39 @@ object Panels {
     private fun schedulePanelFocus(panel: View) {
         cancelPendingFocus()
         val gen = pendingFocusGen
-        fun attempt(): Boolean {
-            if (gen != pendingFocusGen || !panel.isShown) return true
-            if (panel.javaClass.simpleName == "ToolboxKeyboardView") {
-                ToolboxPager.focusFirst(panel)
-                lastFocusedPanel = WeakReference(panel)
-                return true
-            }
-            val target = findFirstContentItem(panel) ?: return false
+        fun performFocus(target: View): Boolean {
             autoFocusing = true
-            val ok = try {
+            return try {
                 target.performAccessibilityAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null)
             } finally {
                 autoFocusing = false
             }
+        }
+        fun attempt(): Boolean {
+            if (gen != pendingFocusGen || !panel.isShown) return true
+            if (panel.javaClass.simpleName == "ToolboxKeyboardView") {
+                ToolboxPager.focusFirst(panel)
+                return true
+            }
+            val target = findFirstContentItem(panel) ?: return false
+            val ok = performFocus(target)
             if (ok) {
-                lastFocusedPanel = WeakReference(panel)
                 L.i("面板首焦命中：${panel.javaClass.simpleName} -> ${target.javaClass.simpleName}/${entryName(target) ?: ""}")
+                // 防止刚点击工具栏按钮后读屏尾随事件把焦点拉回工具栏：120ms 后若未保持聚焦且用户未移焦，再补一次
+                val confirm = Runnable {
+                    if (gen != pendingFocusGen || !panel.isShown) return@Runnable
+                    pendingConfirmRunner = null
+                    try {
+                        val currentTarget = findFirstContentItem(panel) ?: return@Runnable
+                        if (!currentTarget.isAccessibilityFocused) {
+                            performFocus(currentTarget)
+                            L.i("面板首焦补落：${panel.javaClass.simpleName} -> ${currentTarget.javaClass.simpleName}/${entryName(currentTarget) ?: ""}")
+                        }
+                    } catch (_: Throwable) {
+                    }
+                }
+                pendingConfirmRunner = confirm
+                main.postDelayed(confirm, 120L)
             }
             return ok
         }
@@ -379,9 +404,7 @@ object Panels {
         val target = findFirstFallback(panel) ?: return
         autoFocusing = true
         try {
-            if (target.performAccessibilityAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null)) {
-                lastFocusedPanel = WeakReference(panel)
-            }
+            target.performAccessibilityAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null)
         } finally {
             autoFocusing = false
         }

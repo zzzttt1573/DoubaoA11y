@@ -152,6 +152,9 @@ object ViewA11yHooks {
                     if (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD || action == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD) {
                         ToolboxPager.afterScroll(v)
                     }
+                    if (action == AccessibilityNodeInfo.ACTION_CLICK && v.javaClass.simpleName == "ToolboxItemView") {
+                        Panels.focusIfOpened(v.rootView)
+                    }
                     L.i("菜单里读屏操作：动作=${actionName(action)} 控件=${v.javaClass.simpleName} ${idName(v) ?: ""} 「${v.contentDescription ?: (v as? android.widget.TextView)?.text ?: ""}」")
                 }
                 if (action == AccessibilityNodeInfo.ACTION_CLICK && CustomToolbar.isOption(v)) {

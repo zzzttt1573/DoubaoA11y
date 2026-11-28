@@ -117,17 +117,15 @@ object EditOptions {
         }
     }
 
-    /** 切换列表：变空停在“粘贴”，有字停在“默认”，顺带清掉选择态和“刚切过”的标记 */
+    /** 刷新编辑框状态：尽量保持当前停靠的轮盘项（如语音输入开始后空框变有字，不回跳到第一项） */
     private fun apply(now: EditorMenuState, why: String) {
         val changed = now.empty != state.empty
         state = now
         if (changed) {
             if (now.empty == true) dynamicOpen = false
-            selectedId = null
-            navAt = 0L
             L.i("编辑菜单刷新（$why），空框=${now.empty}")
         }
-        selectedId = currentAction
+        selectedId = state.current(ids, selectedId)
     }
 
     fun markTyped() {
@@ -226,11 +224,8 @@ object EditOptions {
             selectionEnded()
             return true
         }
-        // 其余动作都是“做一次就完”的（粘贴、清空文本、收起键盘、朗读…）：
-        // 做完回到“默认”那一项（双击跳行首行尾）。
-        // 用户反馈：上下滑选了“粘贴”、双击粘贴完，轮盘还停在“粘贴”上，
-        // 想跳行首行尾还得再滑回去，很容易误粘第二次。
-        backToDefault()
+        // 其余动作执行完成后固定停留在当前轮盘项上（例如开始语音输入后再次双击直接结束语音，不回跳到粘贴/默认）
+        selectedId = action
         return true
     }
 
