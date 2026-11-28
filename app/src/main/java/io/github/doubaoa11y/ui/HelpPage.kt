@@ -12,7 +12,7 @@ object HelpPage {
 
     fun fill(act: SettingsActivity, root: LinearLayout) {
         val text = try {
-            act.assets.open(FILE).bufferedReader(Charsets.UTF_8).readText().removePrefix("﻿")
+            act.assets.open(FILE).bufferedReader(Charsets.UTF_8).use { it.readText() }.removePrefix("﻿")
         } catch (_: Throwable) {
             null
         }

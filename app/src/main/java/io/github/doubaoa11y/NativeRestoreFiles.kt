@@ -6,6 +6,8 @@ import java.io.InputStream
 import java.io.RandomAccessFile
 
 internal object NativeRestoreFiles {
+    const val FILE_LIMIT = 512
+    const val ENTRY_LIMIT = FILE_LIMIT + 1 // 数据条目（含目录）和一份清单
     const val MANIFEST_LIMIT = 2 * 1024 * 1024
 
     fun readManifest(input: InputStream): ByteArray {

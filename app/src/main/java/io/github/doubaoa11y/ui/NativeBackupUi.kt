@@ -25,7 +25,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.WeakHashMap
-import java.util.zip.ZipInputStream
+import java.util.zip.ZipFile
 
 /**
  * 豆包输入法原生设置离线备份/恢复界面（不依赖豆包账号云同步）。
@@ -47,23 +47,19 @@ object NativeBackupUi {
     )
 
     internal fun inspectNativeZip(zipFile: File): Preview {
-        var manifestText: String? = null
-        ZipInputStream(FileInputStream(zipFile)).use { zis ->
-            while (true) {
-                val e = zis.nextEntry ?: break
-                if (!e.isDirectory && e.name == "manifest.json") {
-                    manifestText = String(NativeRestoreFiles.readManifest(zis), Charsets.UTF_8)
-                    break
-                }
-                zis.closeEntry()
-            }
+        require(zipFile.length() in 1L..MAX_PREVIEW_BYTES) { "原生备份大小无效" }
+        val raw = ZipFile(zipFile).use { zip ->
+            require(zip.size() <= NativeRestoreFiles.ENTRY_LIMIT) { "原生备份条目过多" }
+            val entry = zip.getEntry("manifest.json") ?: error("原生备份缺少 manifest.json")
+            zip.getInputStream(entry).use { String(NativeRestoreFiles.readManifest(it), Charsets.UTF_8) }
         }
-        val raw = manifestText ?: error("无效的豆包原生设置备份（缺少 manifest.json）")
         val j = JSONObject(raw)
         require(j.optInt("formatVersion", -1) == 1) { "不支持的豆包原生备份格式版本" }
         require(j.optString("packageName") == ConfigSpec.TARGET_PACKAGE) { "该备份不是豆包输入法原生备份" }
-        val fileCount = j.optInt("fileCount", j.optJSONArray("files")?.length() ?: 0)
-        require(fileCount > 0) { "豆包原生备份中没有可恢复的文件" }
+        val fileCount = j.getJSONArray("files").length()
+        require(fileCount in 1..NativeRestoreFiles.FILE_LIMIT && j.optInt("fileCount", fileCount) == fileCount) {
+            "豆包原生备份清单数量无效"
+        }
         return Preview(
             tempZip = zipFile,
             doubaoVersionName = j.optString("doubaoVersionName", "未知"),
@@ -184,32 +180,7 @@ object NativeBackupUi {
                     }
                 } ?: error("无法读取所选文件")
 
-                var manifestText: String? = null
-                ZipInputStream(FileInputStream(tmp)).use { zis ->
-                    while (true) {
-                        val e = zis.nextEntry ?: break
-                        if (!e.isDirectory && e.name == "manifest.json") {
-                            manifestText = String(zis.readBytes(), Charsets.UTF_8)
-                            break
-                        }
-                        zis.closeEntry()
-                    }
-                }
-                val raw = manifestText ?: error("该 ZIP 不是有效的豆包原生设置备份（缺少 manifest.json）")
-                val j = JSONObject(raw)
-                require(j.optInt("formatVersion", -1) == 1) { "不支持的备份格式版本" }
-                require(j.optString("packageName") == ConfigSpec.TARGET_PACKAGE) { "该备份不是豆包输入法原生备份" }
-                val fileCount = j.optInt("fileCount", j.optJSONArray("files")?.length() ?: 0)
-                require(fileCount > 0) { "备份中没有可恢复的文件" }
-
-                val preview = Preview(
-                    tempZip = tmp,
-                    doubaoVersionName = j.optString("doubaoVersionName", "未知"),
-                    doubaoVersionCode = j.optLong("doubaoVersionCode", 0L),
-                    timestamp = j.optLong("timestamp", 0L),
-                    fileCount = fileCount,
-                    totalBytes = j.optLong("totalBytes", copied)
-                )
+                val preview = inspectNativeZip(tmp)
                 main.post {
                     dismissProgress(a, progress)
                     if (a.isFinishing || a.isDestroyed) {
@@ -373,7 +344,7 @@ object NativeBackupUi {
         }
         main.postDelayed(timeout, 25_000L)
         try {
-            a.sendOrderedBroadcast(
+            a.applicationContext.sendOrderedBroadcast(
                 intent,
                 null,
                 object : BroadcastReceiver() {
@@ -406,6 +377,8 @@ object NativeBackupUi {
             if (!finished) {
                 finished = true
                 main.removeCallbacks(timeout)
+                revoke()
+                if (token.isNotEmpty()) SettingsProvider.cleanupXfer(a, token)
                 onDone(false, "发送请求给豆包失败：${t.message ?: t.javaClass.simpleName}")
             }
         }

@@ -241,8 +241,7 @@ object SoundPage {
                 } else {
                     SoundEngine.file(a, id).inputStream()
                 }
-                input.use { source -> FileOutputStream(target).use { source.copyTo(it) } }
-                target
+                input.use { source -> AppStorage.publish(target) { source.copyTo(it) } }
             }
             main.post {
                 if (a.isFinishing || a.isDestroyed) return@post
@@ -267,7 +266,7 @@ object SoundPage {
                 val temp = File.createTempFile("sound-", ".audio", a.cacheDir)
                 try {
                     require(src.isFile && src.length() in 1L..ZipBackup.MAX_AUDIO.toLong()) { "音频为空或超过 5 MB" }
-                    FileInputStream(src).use { input -> FileOutputStream(temp).use { input.copyTo(it) } }
+                    FileInputStream(src).use { input -> FileOutputStream(temp).use { AppStorage.copyLimited(input, it, ZipBackup.MAX_AUDIO.toLong()) } }
                     installTempAudio(a, temp, name)
                 } finally {
                     temp.delete()
@@ -336,15 +335,7 @@ object SoundPage {
                 try {
                     requireNotNull(a.contentResolver.openInputStream(uri)).use { source ->
                         temp.outputStream().use { out ->
-                            val buffer = ByteArray(8192)
-                            var size = 0
-                            while (true) {
-                                val count = source.read(buffer)
-                                if (count < 0) break
-                                size += count
-                                require(size <= ZipBackup.MAX_AUDIO) { "音频不能超过 5 MB" }
-                                out.write(buffer, 0, count)
-                            }
+                            AppStorage.copyLimited(source, out, ZipBackup.MAX_AUDIO.toLong())
                         }
                     }
                     installTempAudio(a, temp, name)

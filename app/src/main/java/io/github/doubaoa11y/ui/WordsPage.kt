@@ -48,10 +48,17 @@ class WordsPage(private val act: SettingsActivity) {
         return m
     }
 
-    private fun save() {
-        val s = custom.entries.joinToString("\n") { "${it.key}\t${it.value}" }
-        act.prefs.edit().putString(SettingsActivity.PREF_WORDS, s).apply()
+    private fun save(key: String, value: String?): Boolean {
+        val next = LinkedHashMap(load())
+        if (value == null) next.remove(key) else next[key] = value
+        val text = try { WordTransferFormat.serialize(next) } catch (e: IllegalArgumentException) {
+            act.toast(e.message ?: "解释词无效")
+            return false
+        }
+        act.prefs.edit().putString(SettingsActivity.PREF_WORDS, text).apply()
+        custom = next
         act.send(null)
+        return true
     }
 
     private fun word(r: Row) = custom[r.c] ?: r.builtIn
@@ -255,8 +262,7 @@ class WordsPage(private val act: SettingsActivity) {
                 val c = charInput.text.toString().trim()
                 val w = wordInput.text.toString().trim()
                 if (!CharWords.isSingleHan(c) || w.isEmpty()) return@setPositiveButton
-                custom[c] = w
-                save()
+                if (!save(c, w)) return@setPositiveButton
                 refresh()
                 count.announceForAccessibility("已添加，$c，${w}的$c")
             }
@@ -308,15 +314,13 @@ class WordsPage(private val act: SettingsActivity) {
             .setView(box)
             .setPositiveButton("保存") { _, _ ->
                 val w = input.text.toString().trim()
-                if (w.isEmpty() || w == r.builtIn) custom.remove(r.c) else custom[r.c] = w
-                save()
+                if (!save(r.c, w.takeUnless { it.isEmpty() || it == r.builtIn })) return@setPositiveButton
                 refresh()
                 count.announceForAccessibility("已保存，" + label(r))
             }
             .setNegativeButton("取消", null)
         if (custom.containsKey(r.c)) b.setNeutralButton("恢复自带的") { _, _ ->
-            custom.remove(r.c)
-            save()
+            if (!save(r.c, null)) return@setNeutralButton
             refresh()
             count.announceForAccessibility("已恢复，" + label(r))
         }

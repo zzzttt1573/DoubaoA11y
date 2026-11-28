@@ -156,11 +156,11 @@ object WordTransfer {
             words.putAll(custom)
             val bytes = WordTransferFormat.encode(words)
             target.parentFile?.mkdirs()
-            FileOutputStream(target).use { it.write(bytes) }
+            val published = AppStorage.publish(target) { it.write(bytes) }
             return@work {
                 AlertDialog.Builder(a)
                     .setTitle("导出成功")
-                    .setMessage("已导出 ${words.size} 个解释词。\n保存位置：${AppStorage.displayPath(target)}")
+                    .setMessage("已导出 ${words.size} 个解释词。\n保存位置：${AppStorage.displayPath(published)}")
                     .setPositiveButton("确定", null)
                     .show()
             }

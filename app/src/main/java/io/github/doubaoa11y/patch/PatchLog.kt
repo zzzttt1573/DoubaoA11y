@@ -70,8 +70,8 @@ object PatchLog {
     }
 
     private fun append(ctx: Context, level: String, msg: String) {
-        val line = "${fmt.format(Date())} $level $msg\n"
         synchronized(lock) {
+            val line = "${fmt.format(Date())} $level $msg\n"
             try {
                 writeBounded(privateFile(ctx), line)
             } catch (_: Throwable) {
@@ -87,17 +87,30 @@ object PatchLog {
 
     private fun writeBounded(f: File, line: String) {
         f.parentFile?.mkdirs()
-        if (f.exists() && f.length() > MAX_BYTES) {
-            val keep = runCatching { f.readText(Charsets.UTF_8) }.getOrDefault("")
-            f.writeText(keep.takeLast((MAX_BYTES / 2).toInt()), Charsets.UTF_8)
-        }
-        f.appendText(line, Charsets.UTF_8)
+        val bytes = line.toByteArray(Charsets.UTF_8)
+        if (f.length() + bytes.size > MAX_BYTES) {
+            val tail = if (f.isFile) readTail(f, (MAX_BYTES / 2).toInt()) else byteArrayOf()
+            f.outputStream().use { out ->
+                out.write(tail)
+                val count = minOf(bytes.size, MAX_BYTES.toInt() - tail.size)
+                out.write(bytes, bytes.size - count, count)
+            }
+        } else f.appendBytes(bytes)
     }
+
+    private fun readTail(file: File, limit: Int): ByteArray =
+        java.io.RandomAccessFile(file, "r").use { input ->
+            val length = input.length()
+            val bytes = ByteArray(minOf(length, limit.toLong()).toInt())
+            input.seek(length - bytes.size)
+            input.readFully(bytes)
+            bytes
+        }
 
     fun readAll(ctx: Context): String {
         val body = synchronized(lock) {
             val f = privateFile(ctx)
-            if (f.isFile) runCatching { f.readText(Charsets.UTF_8) }.getOrDefault("") else ""
+            if (f.isFile) runCatching { String(readTail(f, MAX_BYTES.toInt()), Charsets.UTF_8) }.getOrDefault("") else ""
         }
         return "==== 豆包输入法无障碍 安装与修补日志 ====\n" +
             deviceSummary(ctx) + "\n" +

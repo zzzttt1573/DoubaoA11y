@@ -27,7 +27,9 @@ class SettingsProvider : ContentProvider() {
                 for (i in ConfigSpec.items) putBoolean(i.key, p.getBoolean(i.key, i.default))
                 for (i in ConfigSpec.intItems) putInt(i.key, p.getInt(i.key, i.default))
                 for (i in ConfigSpec.strItems) putString(i.key, p.getString(i.key, i.default)?.take(16000))
-                putString(ConfigSpec.EXTRA_CUSTOM_WORDS, p.getString(ConfigSpec.EXTRA_CUSTOM_WORDS, "")?.take(200000))
+                val words = p.getString(ConfigSpec.EXTRA_CUSTOM_WORDS, "").orEmpty()
+                require(words.length <= io.github.doubaoa11y.ui.WordTransferFormat.MAX_CHARS) { "自定义解释词超过容量，请在设置中调整" }
+                putString(ConfigSpec.EXTRA_CUSTOM_WORDS, words)
             }
             "setUpperOperation" -> Bundle().apply {
                 require(extras?.get("upperOperation") is Boolean)

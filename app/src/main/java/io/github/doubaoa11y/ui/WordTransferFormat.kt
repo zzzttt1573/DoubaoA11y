@@ -30,6 +30,10 @@ object WordTransferFormat {
         require(bytes.size <= MAX_BYTES) { "解释词文件超过 1 MB" }
         val text = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
             .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString().removePrefix(BOM)
+        return parseText(text)
+    }
+
+    fun parseText(text: String): Map<String, String> {
         require(text.length <= MAX_CHARS) { "解释词内容超过 200000 字符" }
         val result = LinkedHashMap<String, String>()
         if (text.isEmpty()) return result

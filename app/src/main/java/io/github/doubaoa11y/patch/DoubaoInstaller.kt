@@ -495,12 +495,12 @@ object DoubaoInstaller {
         dir.mkdirs()
         val name = "豆包输入法_${prepared.doubaoVersionName}_含无障碍${ConfigSpec.MODULE_VERSION_NAME}.apk"
         val target = AppStorage.uniqueFile(dir, name, ".apk")
-        prepared.baseApk.inputStream().use { input ->
-            target.outputStream().use { output ->
+        val published = prepared.baseApk.inputStream().use { input ->
+            AppStorage.publish(target) { output ->
                 input.copyTo(output, 64 * 1024)
             }
         }
-        PatchLog.i(ctx, "已导出修补安装包到：${target.absolutePath}（${target.length()} B）")
-        return target
+        PatchLog.i(ctx, "已导出修补安装包到：${published.absolutePath}（${published.length()} B）")
+        return published
     }
 }

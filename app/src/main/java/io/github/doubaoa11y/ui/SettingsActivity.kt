@@ -588,10 +588,15 @@ class SettingsActivity : Activity() {
         for (item in ConfigSpec.items) intent.putExtra(item.key, prefs.getBoolean(item.key, item.default))
         for (item in ConfigSpec.intItems) intent.putExtra(item.key, prefs.getInt(item.key, item.default))
         for (item in ConfigSpec.strItems) intent.putExtra(item.key, prefs.getString(item.key, item.default) ?: item.default)
-        intent.putExtra(ConfigSpec.EXTRA_CUSTOM_WORDS, prefs.getString(PREF_WORDS, "") ?: "")
+        val words = prefs.getString(PREF_WORDS, "").orEmpty()
+        if (words.length > WordTransferFormat.MAX_CHARS) {
+            toast("自定义解释词超过容量，请调整后同步")
+            return
+        }
+        intent.putExtra(ConfigSpec.EXTRA_CUSTOM_WORDS, words)
         if (cmd != null) intent.putExtra(ConfigSpec.EXTRA_CMD, cmd)
         try {
-            sendOrderedBroadcast(intent, null, object : BroadcastReceiver() {
+            applicationContext.sendOrderedBroadcast(intent, null, object : BroadcastReceiver() {
                 override fun onReceive(context: Context, i: Intent) {
                     val ok = resultCode == RESULT_OK && resultData != null
                     if (ok) {
@@ -608,6 +613,7 @@ class SettingsActivity : Activity() {
                             if (synced) ed.apply()
                         }
                     }
+                    if (isFinishing || isDestroyed) return
                     // 改开关时成功就不打扰，只在没送到时提示
                     if (cmd == null && ok) return
                     val msg = if (ok) {

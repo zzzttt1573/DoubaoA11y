@@ -13,7 +13,7 @@ import android.widget.TextView
 import io.github.doubaoa11y.ConfigSpec
 import io.github.doubaoa11y.SettingsProvider
 import io.github.doubaoa11y.SpeechEngine
-import org.json.JSONObject
+import io.github.doubaoa11y.NativeRestoreFiles
 import java.io.Closeable
 import java.io.File
 import java.io.FileInputStream
@@ -22,7 +22,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicReference
-import java.util.zip.ZipInputStream
+import java.util.zip.ZipFile
 
 /**
  * 统一备份与恢复：将无障碍模块（设置、自定义解释词、导入音效）与豆包输入法原生设置
@@ -159,45 +159,20 @@ object SettingsBackup {
     /** 快速判断 ZIP 是否是本模块能恢复的有效备份，过滤掉无关或损坏的压缩包。 */
     private fun inspectCandidateKind(file: File): String? {
         return try {
-            val head = ByteArray(2)
-            FileInputStream(file).use {
-                if (it.read(head) != 2 || head[0] != 0x50.toByte() || head[1] != 0x4b.toByte()) return null
-            }
-            var hasSettingsJson = false
-            var hasSettingsTxt = false
-            var hasNestedNative = false
-            var rootManifestJson: String? = null
-            ZipInputStream(FileInputStream(file)).use { zis ->
-                var entries = 0
-                while (true) {
-                    val e = zis.nextEntry ?: break
-                    entries++
-                    if (entries > 512) break
-                    if (!e.isDirectory) {
-                        when (e.name) {
-                            "settings.json" -> hasSettingsJson = true
-                            "settings.txt" -> hasSettingsTxt = true
-                            ZipBackup.NATIVE_ENTRY -> hasNestedNative = true
-                            "manifest.json" -> {
-                                val bytes = zis.readBytes()
-                                if (bytes.size <= 512 * 1024) rootManifestJson = String(bytes, Charsets.UTF_8)
-                            }
-                        }
+            ZipFile(file).use { zip ->
+                if (zip.getEntry("manifest.json") != null) {
+                    NativeBackupUi.inspectNativeZip(file)
+                    "豆包原生备份"
+                } else {
+                    require(zip.size() <= ZipBackup.MAX_ENTRIES)
+                    when {
+                        zip.getEntry("settings.json") != null && zip.getEntry(ZipBackup.NATIVE_ENTRY) != null ->
+                            "完整备份（模块+豆包原生）"
+                        zip.getEntry("settings.json") != null -> "无障碍模块备份"
+                        zip.getEntry("settings.txt") != null -> "社区兼容备份"
+                        else -> null
                     }
-                    zis.closeEntry()
                 }
-            }
-            when {
-                hasSettingsJson && hasNestedNative -> "完整备份（模块+豆包原生）"
-                hasSettingsJson -> "无障碍模块备份"
-                hasSettingsTxt -> "社区兼容备份"
-                rootManifestJson != null -> {
-                    val j = JSONObject(rootManifestJson!!)
-                    if (j.optInt("formatVersion", -1) == 1 && j.optString("packageName") == ConfigSpec.TARGET_PACKAGE) {
-                        "豆包原生备份"
-                    } else null
-                }
-                else -> null
             }
         } catch (_: Throwable) {
             null
@@ -296,7 +271,7 @@ object SettingsBackup {
                     .setPositiveButton("仅导出模块设置") { _, _ ->
                         writeBackupFile(
                             a, destFile, moduleBytes, null,
-                            "已导出无障碍模块备份（未包含豆包原生设置）。\n保存位置：${AppStorage.displayPath(destFile)}"
+                            "已导出无障碍模块备份（未包含豆包原生设置）。"
                         )
                     }
                     .create()
@@ -309,7 +284,7 @@ object SettingsBackup {
                     val nativeSrc = SettingsProvider.xferFile(a, token)
                     check(nativeSrc != null && nativeSrc.isFile) { "未收到豆包导出的中转文件" }
                     destFile.parentFile?.mkdirs()
-                    FileOutputStream(destFile).use { output ->
+                    val published = AppStorage.publish(destFile) { output ->
                         ZipBackup.write(output, moduleBytes, File(a.filesDir, "sounds"), nativeSrc)
                         output.flush()
                     }
@@ -319,12 +294,11 @@ object SettingsBackup {
                         if (!a.isFinishing && !a.isDestroyed) {
                             showAlert(
                                 a, "导出成功",
-                                "完整备份已保存（包含无障碍模块设置、音效与豆包原生设置）。\n保存位置：${AppStorage.displayPath(destFile)}\n$nativeMsg"
+                                "完整备份已保存（包含无障碍模块设置、音效与豆包原生设置）。\n保存位置：${AppStorage.displayPath(published)}\n$nativeMsg"
                             )
                         }
                     }
                 } catch (t: Throwable) {
-                    destFile.delete()
                     SettingsProvider.cleanupXfer(a, token)
                     main.post {
                         dismissProgress(a, progress)
@@ -339,34 +313,19 @@ object SettingsBackup {
 
     private fun writeBackupFile(a: SettingsActivity, destFile: File, moduleBytes: ByteArray, nativeZip: File?, doneMsg: String) {
         work(a, "正在导出备份") {
-            try {
-                destFile.parentFile?.mkdirs()
-                FileOutputStream(destFile).use { output ->
-                    ZipBackup.write(output, moduleBytes, File(a.filesDir, "sounds"), nativeZip)
-                    output.flush()
-                }
-            } catch (t: Throwable) {
-                destFile.delete()
-                throw t
+            val published = AppStorage.publish(destFile) { output ->
+                ZipBackup.write(output, moduleBytes, File(a.filesDir, "sounds"), nativeZip)
             }
-            return@work { showAlert(a, "导出成功", doneMsg) }
+            return@work { showAlert(a, "导出成功", "$doneMsg\n保存位置：${AppStorage.displayPath(published)}") }
         }
     }
 
     private fun readUri(a: SettingsActivity, uri: Uri): Plan {
         val tmp = File(a.cacheDir, "backup_in_${NativeBackupUi.randomToken()}.zip")
         try {
-            var copied = 0L
             a.contentResolver.openInputStream(uri)?.use { input ->
                 FileOutputStream(tmp).use { out ->
-                    val buf = ByteArray(64 * 1024)
-                    while (true) {
-                        val n = input.read(buf)
-                        if (n < 0) break
-                        copied += n
-                        require(copied <= ZipBackup.MAX_UNIFIED_TOTAL) { "备份文件超过 96 MB" }
-                        out.write(buf, 0, n)
-                    }
+                    AppStorage.copyLimited(input, out, ZipBackup.MAX_UNIFIED_TOTAL.toLong())
                 }
             } ?: error("无法读取文件")
             return parseTempZip(a, tmp, deleteOnStandalone = true)
@@ -382,7 +341,7 @@ object SettingsBackup {
         try {
             FileInputStream(srcFile).use { input ->
                 FileOutputStream(tmp).use { out ->
-                    input.copyTo(out, 64 * 1024)
+                    AppStorage.copyLimited(input, out, ZipBackup.MAX_UNIFIED_TOTAL.toLong())
                 }
             }
             return parseTempZip(a, tmp, deleteOnStandalone = true)
@@ -396,16 +355,9 @@ object SettingsBackup {
         val head = ByteArray(2)
         FileInputStream(tmp).use { check(it.read(head) == 2 && head[0] == 0x50.toByte() && head[1] == 0x4b.toByte()) { "请选择 ZIP 备份文件" } }
 
-        var hasRootManifest = false
-        ZipInputStream(FileInputStream(tmp)).use { zis ->
-            while (true) {
-                val e = zis.nextEntry ?: break
-                if (!e.isDirectory && e.name == "manifest.json") {
-                    hasRootManifest = true
-                    break
-                }
-                zis.closeEntry()
-            }
+        val hasRootManifest = ZipFile(tmp).use { zip ->
+            require(zip.size() <= NativeRestoreFiles.ENTRY_LIMIT) { "备份条目过多" }
+            zip.getEntry("manifest.json") != null
         }
         if (hasRootManifest) {
             val nativePreview = NativeBackupUi.inspectNativeZip(tmp)
@@ -480,28 +432,35 @@ object SettingsBackup {
     private fun executeRestore(a: SettingsActivity, plan: Plan) {
         val progress = showProgress(a, "正在恢复备份", "正在写入设置并校验恢复包…")
         Thread({
+            var moduleApplied = false
+            var pendingToken: String? = null
             try {
                 val data = plan.data
                 if (data != null) {
-                    val before = a.prefs.all.mapValues { (_, value) -> if (value is Set<*>) value.toSet() else value }
+                    val keys = data.settings.keys + listOfNotNull(ConfigSpec.EXTRA_CUSTOM_WORDS.takeIf { data.words != null })
+                    var before: Map<String, Any?> = emptyMap()
                     BackupResourceTransaction.restore(
                         File(a.filesDir, "sounds"),
                         plan.archive?.sounds,
                         plan.archive != null && !plan.archive.legacy,
                         applySettings = {
+                            val snapshot = a.prefs.all
+                            before = keys.associateWith { snapshot[it] }
                             val e = a.prefs.edit()
                             for ((key, value) in data.settings) put(e, key, value)
                             data.words?.let { e.putString(ConfigSpec.EXTRA_CUSTOM_WORDS, it) }
                             check(e.commit()) { "保存设置失败" }
                         },
                         rollbackSettings = {
-                            val e = a.prefs.edit().clear()
+                            val e = a.prefs.edit()
                             for ((key, value) in before) put(e, key, value)
                             check(e.commit()) { "设置回滚失败" }
                         },
                         applyIcon = {},
                         rollbackIcon = {},
                     )
+                    moduleApplied = true
+                    main.post { a.send(null) }
                     SpeechEngine.stop()
                 }
 
@@ -512,14 +471,14 @@ object SettingsBackup {
                         dismissProgress(a, progress)
                         if (!a.isFinishing && !a.isDestroyed) {
                             a.rebuild()
-                            a.send(null)
-                            a.toast("备份已恢复")
+                            a.toast("模块设置已恢复")
                         }
                     }
                     return@Thread
                 }
 
                 val token = NativeBackupUi.randomToken()
+                pendingToken = token
                 val xfer = SettingsProvider.xferFile(a, token) ?: error("无效中转路径")
                 xfer.parentFile?.mkdirs()
                 FileInputStream(nativeZip).use { input ->
@@ -529,15 +488,7 @@ object SettingsBackup {
                 }
                 plan.close()
                 main.post {
-                    if (a.isFinishing || a.isDestroyed) {
-                        SettingsProvider.cleanupXfer(a, token)
-                        dismissProgress(a, progress)
-                        return@post
-                    }
-                    if (data != null) {
-                        a.rebuild()
-                        a.send(null)
-                    }
+                    if (data != null && !a.isFinishing && !a.isDestroyed) a.rebuild()
                     NativeBackupUi.sendNativeBroadcast(
                         a = a,
                         cmd = ConfigSpec.CMD_NATIVE_RESTORE,
@@ -566,11 +517,12 @@ object SettingsBackup {
                     }
                 }
             } catch (t: Throwable) {
+                pendingToken?.let { SettingsProvider.cleanupXfer(a, it) }
                 plan.close()
                 main.post {
                     dismissProgress(a, progress)
                     if (!a.isFinishing && !a.isDestroyed) {
-                        showAlert(a, "恢复失败", t.message ?: "无法处理这个文件")
+                        showAlert(a, if (moduleApplied) "模块已恢复，原生恢复未完成" else "恢复失败", t.message ?: "无法处理这个文件")
                     }
                 }
             }
@@ -579,6 +531,7 @@ object SettingsBackup {
 
     private fun put(e: SharedPreferences.Editor, key: String, value: Any?) {
         when (value) {
+            null -> e.remove(key)
             is Boolean -> e.putBoolean(key, value)
             is Int -> e.putInt(key, value)
             is Long -> e.putLong(key, value)
