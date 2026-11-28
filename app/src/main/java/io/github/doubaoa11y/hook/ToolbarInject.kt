@@ -234,7 +234,7 @@ object ToolbarInject {
                 } else {
                     saveOrder(arr.toList())
                 }
-                val filtered = arr.filter { !isCustomKey(it) }.toTypedArray()
+                val filtered = ToolbarOrderPolicy.nativeOnly(arr.toList(), toolMap.keys)
                 p.args[0] = filtered
             }))
 
@@ -242,14 +242,15 @@ object ToolbarInject {
             SafeHook("ToolbarInject.confirm", before = {
                 if (!inEditSession) return@SafeHook
                 val order = draftOrder ?: return@SafeHook
-                val nativeOnly = order.filter { !isCustomKey(it) }
+                val nativeOnly = ToolbarOrderPolicy.nativeOnly(order, toolMap.keys)
                 if (nativeOnly.isNotEmpty()) {
                     try {
                         val jni = JniHooks.jni()
                         if (jni != null) {
                             selfReordering = true
                             try {
-                                XposedHelpers.callMethod(jni, "reorderToolbarButtons", nativeOnly.toTypedArray())
+                                val ok = XposedHelpers.callMethod(jni, "reorderToolbarButtons", nativeOnly)
+                                if (ok == false) L.w("ToolbarInject：豆包 reorderToolbarButtons 返回 false")
                             } finally {
                                 selfReordering = false
                             }
@@ -295,7 +296,6 @@ object ToolbarInject {
 
     /** 进入定制工具栏时构造当前已添加按钮的有序列表，作为后续按点击先后追加的基准 */
     private fun buildInitialVisibleOrder(): MutableList<String> {
-        val visibleSet = LinkedHashSet<String>()
         val nativeVisible = ArrayList<Pair<String, Int>>()
         try {
             val jni = JniHooks.jni()
@@ -322,22 +322,9 @@ object ToolbarInject {
         } catch (t: Throwable) {
             L.hookError("ToolbarInject.buildInitialVisibleOrder", t)
         }
-        val nativeOrdered = nativeVisible.sortedBy { it.second }.map { it.first }
-        for (k in nativeOrdered) visibleSet.add(k)
-        for (t in tools) {
-            if (isToolEnabled(t.key)) visibleSet.add(t.key)
-        }
-        val out = ArrayList<String>(visibleSet.size)
+        val enabledCustom = tools.filter { isToolEnabled(it.key) }.map { it.key }
         val saved = parseOrder(Config.s("toolbarCustomOrder"))
-        if (!saved.isNullOrEmpty()) {
-            for (k in saved) {
-                if (k in visibleSet && k !in out) out.add(k)
-            }
-        }
-        for (k in visibleSet) {
-            if (k !in out) out.add(k)
-        }
-        return out
+        return ToolbarOrderPolicy.mergeInitialOrder(nativeVisible, enabledCustom, saved)
     }
 
     private fun mergeToolbarConfig(raw: String): String? = try {

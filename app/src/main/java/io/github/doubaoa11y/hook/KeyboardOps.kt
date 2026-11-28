@@ -506,6 +506,15 @@ object KeyboardOps {
         Speaker.echo(text)
     }
 
+    /** 收到豆包 1.5.7 原生智能整理失败/降级原因，立即结束 15 秒盲等并播报明确提示 */
+    fun onOrganizeFallback(reason: String, message: String?) {
+        val now = SystemClock.uptimeMillis()
+        if (now > organizeWatchUntil) return
+        L.i("智能整理原生回退：reason=$reason -> ${message ?: "静默取消"}")
+        cancelOrganizeWatch()
+        if (!message.isNullOrBlank()) Speaker.echo(message)
+    }
+
     /** 结束当前智能整理监听（收到其他手势、用户手动按键或收起键盘时调用） */
     fun cancelOrganizeWatch() {
         organizeToken++

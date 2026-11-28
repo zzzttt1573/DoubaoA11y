@@ -27,6 +27,7 @@ class HookEntry : IXposedHookLoadPackage {
             installStep("ToolbarInject.install") { ToolbarInject.install(cl) }
             installStep("EditHooks.install") { EditHooks.install(cl) }
             installStep("StepSlider.install") { StepSlider.install(cl) }
+            installStep("Doubao157Hooks.install") { Doubao157Hooks.install(cl) }
             // 豆包自己的设置页在 :Setting 进程，只在那里补开关、复选框、滑块的无障碍信息
             if (lpparam.processName == ConfigSpec.TARGET_PACKAGE + ":Setting") installStep("NativeSettingsA11y.install") { NativeSettingsA11y.install(cl) }
             L.i("hook 安装结束：${Hooker.summary()}")

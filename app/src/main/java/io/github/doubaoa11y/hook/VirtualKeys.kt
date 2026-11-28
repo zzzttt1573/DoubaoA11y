@@ -1266,126 +1266,18 @@ object VirtualKeys {
         return asr.visibility == View.VISIBLE && asr.isShown
     }
 
-    private fun isVoiceCancelZone(zone: String): Boolean =
-        zone.contains("撤回") || zone.contains("取消")
+    private fun isVoiceCancelZone(zone: String): Boolean = VoiceZoneReader.isCancelZone(zone)
 
-    /**
-     * 语音长按界面：手指滑进左右两个区域时朗读。
-     * - 状态判定：豆包 1.5.4~1.5.6 用 r/s，1.5.7+ 字段顺延为 s/t（自动检测 t 是否为 boolean 字段）。
-     * - 朗读文案：动态读取豆包界面真实文字（中间读 asr_long_press_text，左右优先读 asr_action_btn 内部文案，
-     *   读不到时再根据中间文字是否含“发送”区分普通模式与 1.5.7“说完即发”模式）。
-     */
+    /** 语音长按界面：手指滑进左右两个区域时朗读（底层反射与多版本字段映射委托给 VoiceZoneReader） */
     private fun checkVoiceZone(kb: View) {
-        val asr = try {
-            de.robv.android.xposed.XposedHelpers.getObjectField(kb, "mAsrLongPressView") as? View
-        } catch (_: Throwable) {
-            null
-        } ?: return
-        if (asr.visibility != View.VISIBLE) return
-        val pkg = asr.context.packageName
-        val id = asr.resources.getIdentifier("asr_action_btn", "id", pkg)
-        val btn = if (id != 0) asr.findViewById<View>(id) else null
-        val (left, right) = if (btn != null) {
-            val tVal = boolField(btn, "t")
-            val sVal = boolField(btn, "s")
-            val rVal = boolField(btn, "r")
-            if (tVal != null && sVal != null) {
-                // 1.5.7+：s = 左（撤回），t = 右（发送 / 仅上屏）
-                sVal to tVal
-            } else {
-                // 1.5.4~1.5.6：r = 左（撤回），s = 右（发送）
-                (rVal ?: false) to (sVal ?: false)
-            }
-        } else {
-            false to false
-        }
-        val textId = asr.resources.getIdentifier("asr_long_press_text", "id", pkg)
-        val centerText = if (textId != 0) {
-            (asr.findViewById<View>(textId) as? android.widget.TextView)?.text?.toString()?.trim().orEmpty()
-        } else ""
-        val btnTexts = btn?.let { readVoiceBtnTexts(it) }
-        val leftLabel = btnTexts?.first?.takeIf { it.isNotEmpty() } ?: "松手撤回输入"
-        val rightLabel = btnTexts?.second?.takeIf { it.isNotEmpty() } ?: if (centerText.contains("发送")) {
-            "松手仅上屏"
-        } else {
-            "松手一键发送"
-        }
-        val centerLabel = centerText.ifEmpty { "松手结束" }
-        val zone = when {
-            left -> leftLabel
-            right -> rightLabel
-            else -> centerLabel
-        }
+        val reading = VoiceZoneReader.read(kb) ?: return
+        val zone = reading.zone
         if (zone != voiceZone) {
             val first = voiceZone.isEmpty()
             voiceZone = zone
             if (!first && Config.b("voiceZoneHint")) Speaker.speak(zone)
-            L.i {
-                val dbg = btn?.let { dumpBoolFields(it) }.orEmpty()
-                val txtDbg = btn?.let { dumpStringFields(it) }.orEmpty()
-                "语音区域：$zone（中=$centerText${if (dbg.isNotEmpty()) "，$dbg" else ""}${if (txtDbg.isNotEmpty()) "，$txtDbg" else ""}）"
-            }
+            L.i(reading.debugInfo)
         }
-    }
-
-    private class VoiceFields(type: Class<*>) {
-        val flags = listOf("r", "s", "t").associateWith { name ->
-            de.robv.android.xposed.XposedHelpers.findFieldIfExists(type, name)
-        }
-        val strings = accessibleFields(type, String::class.java)
-        val booleans = accessibleFields(type, Boolean::class.javaPrimitiveType!!)
-
-        private fun accessibleFields(type: Class<*>, fieldType: Class<*>) = try {
-            type.declaredFields.filter { it.type == fieldType }.onEach { it.isAccessible = true }
-        } catch (t: Throwable) {
-            L.hookError("VirtualKeys.voiceFields ${type.name} ${fieldType.name}", t)
-            emptyList<java.lang.reflect.Field>()
-        }
-    }
-
-    private val voiceFields = java.util.concurrent.ConcurrentHashMap<Class<*>, VoiceFields>()
-    private fun fieldsOf(o: Any) = voiceFields.computeIfAbsent(o.javaClass) { VoiceFields(it) }
-
-    /** 从 asr_action_btn 内部读取左右按钮的实时中文文案（左=撤回/取消，右=发送/上屏/转文字） */
-    private fun readVoiceBtnTexts(btn: Any): Pair<String, String>? = try {
-        val texts = fieldsOf(btn).strings
-            .mapNotNull { f ->
-                (f.get(btn) as? String)?.trim()?.takeIf { it.length in 2..16 && it.any { ch -> ch in '\u4e00'..'\u9fff' } }
-            }
-            .distinct()
-        if (texts.isEmpty()) null else {
-            val cancelText = texts.firstOrNull { isVoiceCancelZone(it) }.orEmpty()
-            val rightText = texts.firstOrNull { it != cancelText && (it.contains("发送") || it.contains("上屏") || it.contains("文字") || it.contains("输入")) }.orEmpty()
-            if (cancelText.isEmpty() && rightText.isEmpty()) null else cancelText to rightText
-        }
-    } catch (_: Throwable) {
-        null
-    }
-
-    private fun dumpStringFields(o: Any): String = try {
-        fieldsOf(o).strings
-            .mapNotNull { f ->
-                val v = (f.get(o) as? String)?.trim()
-                if (v.isNullOrEmpty()) null else "${f.name}=$v"
-            }
-            .joinToString(",")
-    } catch (_: Throwable) {
-        ""
-    }
-
-    private fun dumpBoolFields(o: Any): String = try {
-        fieldsOf(o).booleans
-            .joinToString(",") { f ->
-                "${f.name}=${f.getBoolean(o)}"
-            }
-    } catch (_: Throwable) {
-        ""
-    }
-
-    private fun boolField(o: Any, name: String): Boolean? = try {
-        fieldsOf(o).flags[name]?.getBoolean(o)
-    } catch (_: Throwable) {
-        null
     }
 
     /** 虚拟按键式：读屏抬手点击时，刚松开长按的不再重复输入 */
