@@ -21,7 +21,7 @@ object EditOptions {
 
     private val main = Handler(Looper.getMainLooper())
 
-    private var index = 0
+    private var selectedId: Int? = null
 
     /** 最近一次切换选项的时间：刚切完（2 秒内）双击就是在执行它，不去抢候选 */
     private var navAt = 0L
@@ -29,22 +29,7 @@ object EditOptions {
     /** 动态项（剪切/复制/取消选择）现在有没有展开在列表里 */
     private var dynamicOpen = false
 
-    /**
-     * 编辑框现在是空的。
-     *
-     * 用户要求：空编辑框时只留「粘贴」「收起键盘」两项，默认停在「粘贴」，
-     * 直接双击就把剪贴板内容贴进来；**只要有字，不管字是怎么进去的**
-     * （打字、语音、粘贴、长按粘贴、自动纠错、别的应用改写…），
-     * 立刻换回完整列表并停在「双击跳转行首行尾」。
-     *
-     * 2.0.0 第一版只在上屏/删除/粘贴这几个节点查，覆盖面太窄：
-     * 语音说完、豆包自己把字写进编辑框这些路径根本不经过那几处，
-     * 于是“都输入完了，轮盘还停在粘贴/收起键盘”（用户反馈）。
-     * 2.0.1 起除了节点触发，键盘显示期间还有一条**兜底轮询**（[tick]），
-     * 空着时 300 毫秒问一次、有字时 1.2 秒问一次，任何方式进来都跑不掉。
-     */
-    @Volatile
-    private var empty = true
+    private var state = EditorMenuState()
 
     /** 键盘显示中：只有这时候才值得盯着编辑框 */
     @Volatile
@@ -53,39 +38,21 @@ object EditOptions {
     /** 兜底轮询开着没有 */
     private var watching = false
 
-    /** 连续几次问到“空”才真的算空（输入连接一瞬间拿不到时别误判） */
-    private var emptyHits = 0
-
     /** 空着的时候查得勤一点：要尽快从“粘贴/收起键盘”切回完整列表 */
     private const val WATCH_EMPTY_MS = 300L
 
     /** 有字的时候只需要发现“被清空了”，慢一点省电省跨进程 */
     private const val WATCH_FULL_MS = 1200L
 
-    /** 空编辑框时的选项：只留粘贴和收起键盘 */
-    private val emptyIds: List<Int> = listOf(ConfigSpec.ACT_PASTE, ConfigSpec.ACT_HIDE)
-
-    /** 基础列表（不含动态项），就是用户在设置里配的那串 */
-    private val baseIds: List<Int>
-        get() = ConfigSpec.parseEditOptions(Config.s(ConfigSpec.EDIT_OPTIONS_KEY))
-
-    /**
-     * 当前完整列表：
-     * - 选择态：剪切、复制、删除文本、取消选择；
-     * - 编辑框空的：粘贴、收起键盘；
-     * - 其他：用户配的那串（出厂是 默认/全选文本/选择文本/粘贴/清空文本/收起键盘）。
-     */
     private val ids: List<Int>
-        get() = when {
-            dynamicOpen -> ConfigSpec.EDIT_OPTIONS_DYNAMIC.map { it.second }
-            empty -> emptyIds
-            else -> baseIds
-        }
+        get() = if (dynamicOpen) {
+            ConfigSpec.EDIT_OPTIONS_DYNAMIC.map { it.second }.filter {
+                state.selected != false || it == ConfigSpec.ACT_DESELECT
+            }
+        } else state.available(ConfigSpec.parseEditOptions(Config.s(ConfigSpec.EDIT_OPTIONS_KEY)))
 
     val size: Int get() = ids.size
-
-    /** 编辑框现在是空的（给设置页状态行和手势用） */
-    val editorEmpty: Boolean get() = empty
+    val editorEmpty: Boolean get() = state.empty == true
 
     /**
      * 重新问一次编辑框有没有内容（关键节点调用：换输入框、键盘显示、上屏、删除、粘贴…）。
@@ -105,7 +72,6 @@ object EditOptions {
      */
     fun onKeyboardShown() {
         keyboardUp = true
-        emptyHits = 0
         refresh("键盘显示")
         startWatch()
     }
@@ -121,14 +87,13 @@ object EditOptions {
         watching = true
         main.removeCallbacks(tick)
         main.postDelayed(tick, WATCH_EMPTY_MS)
-        L.i("编辑菜单开始盯着编辑框（空=${empty}）")
+        L.i("编辑菜单开始盯着编辑框（空=$editorEmpty）")
     }
 
     private fun stopWatch() {
         if (!watching) return
         watching = false
         main.removeCallbacks(tick)
-        emptyHits = 0
         L.i("编辑菜单停止盯着编辑框")
     }
 
@@ -144,60 +109,36 @@ object EditOptions {
                 return
             }
             try {
-                val nowEmpty = EditActions.editorEmpty()
-                if (nowEmpty != empty) {
-                    if (!nowEmpty) {
-                        // 有字了：立刻切，一次都不等（用户要的就是“一出现文字就变”）
-                        emptyHits = 0
-                        apply(false, "轮询发现编辑框有内容")
-                    } else {
-                        // 变空：连续两次都问到空才切，防输入连接瞬时为空误判
-                        emptyHits++
-                        if (emptyHits >= 2) {
-                            emptyHits = 0
-                            apply(true, "轮询发现编辑框空了")
-                        }
-                    }
-                } else {
-                    emptyHits = 0
-                }
+                apply(EditActions.editorEmpty(), "轮询")
             } catch (t: Throwable) {
                 L.hookError("EditOptions 轮询", t)
             }
-            if (watching) main.postDelayed(this, if (empty) WATCH_EMPTY_MS else WATCH_FULL_MS)
+            if (watching) main.postDelayed(this, if (state.empty != false) WATCH_EMPTY_MS else WATCH_FULL_MS)
         }
     }
 
     /** 切换列表：变空停在“粘贴”，有字停在“默认”，顺带清掉选择态和“刚切过”的标记 */
-    private fun apply(nowEmpty: Boolean, why: String) {
-        if (empty == nowEmpty) {
-            // 空着的时候列表只有两项，index 别越界
-            if (nowEmpty && index >= emptyIds.size) index = 0
-            return
+    private fun apply(now: EditorMenuState, why: String) {
+        val changed = now.empty != state.empty
+        state = now
+        if (changed) {
+            if (now.empty == true) dynamicOpen = false
+            selectedId = null
+            navAt = 0L
+            L.i("编辑菜单刷新（$why），空框=${now.empty}")
         }
-        empty = nowEmpty
-        dynamicOpen = false
-        // 变空：停在“粘贴”（第一步就能直接双击粘贴）；有字：停在“默认”（双击跳行首行尾）
-        index = if (nowEmpty) 0 else baseIds.indexOf(ConfigSpec.ACT_DEFAULT).let { if (it < 0) 0 else it }
-        navAt = 0L
-        L.i("编辑框${if (nowEmpty) "变空" else "有内容"}（$why），编辑菜单：${ids.joinToString { ConfigSpec.actionName(it) }}")
+        selectedId = currentAction
     }
 
-    /** 刚打了字：一定是“有内容”，直接切到完整列表并回到默认项，不用跨进程问 */
     fun markTyped() {
-        emptyHits = 0
-        if (!empty) {
-            backToDefault()
-            return
-        }
-        empty = false
-        dynamicOpen = false
+        state = EditorMenuState(empty = false, selected = false)
         backToDefault()
     }
 
     /** 换输入框、键盘收起时回到第一项，并把动态项收起来 */
     fun reset() {
-        index = 0
+        state = EditorMenuState()
+        selectedId = null
         navAt = 0L
         dynamicOpen = false
     }
@@ -207,14 +148,15 @@ object EditOptions {
 
     /** 进入选择态：动态项变成“剪切/复制/删除文本/取消选择”，光标停在第一项（剪切）上 */
     fun enterSelection() {
+        state = EditActions.editorEmpty()
         dynamicOpen = true
-        index = 0
+        selectedId = ids.firstOrNull()
     }
 
     /** 退出选择态：收起动态项，回到基础列表第一项 */
     fun selectionEnded() {
         dynamicOpen = false
-        index = 0
+        selectedId = ids.firstOrNull()
     }
 
     /**
@@ -228,7 +170,7 @@ object EditOptions {
         val wasDynamic = dynamicOpen
         dynamicOpen = false
         // 打了字编辑框就有内容了：列表切回完整那套，并停在“双击跳转行首行尾”
-        empty = false
+        state = EditorMenuState(empty = false, selected = false)
         backToDefault()
         // 刚打过字，不算“刚切过编辑菜单”，候选优先重新生效
         navAt = 0L
@@ -237,7 +179,7 @@ object EditOptions {
 
     val currentName: String
         get() {
-            val id = ids.getOrNull(index) ?: return "默认"
+            val id = currentAction ?: return "没有可用的编辑菜单项"
             // 选择态下只有“取消选择”这一项，用动态项名字；普通状态用动作名
             if (dynamicOpen) {
                 return ConfigSpec.dynamicName(id) ?: ConfigSpec.actionName(id)
@@ -245,38 +187,28 @@ object EditOptions {
             return ConfigSpec.actionName(id)
         }
 
-    val currentAction: Int
-        get() = ids.getOrNull(index) ?: ConfigSpec.ACT_DEFAULT
+    val currentAction: Int?
+        get() = state.current(ids, selectedId)
 
     /** 刚切换过选项（2 秒内） */
     fun isFresh(): Boolean = navAt > 0 && SystemClock.uptimeMillis() - navAt < 2000
 
-    fun next(): Boolean {
+    fun next() = navigate(1)
+    fun prev() = navigate(-1)
+
+    private fun navigate(direction: Int): Boolean {
+        val list = ids
+        if (list.isEmpty()) return false
         Sound.play("double")
-        val n = ids.size
-        if (n == 0) return false
-        index = if (index + 1 >= n) 0 else index + 1
+        val index = list.indexOf(state.current(list, selectedId))
+        selectedId = list[(index + direction + list.size) % list.size]
         navAt = SystemClock.uptimeMillis()
         announce()
         return true
     }
 
-    fun prev(): Boolean {
-        Sound.play("double")
-        val n = ids.size
-        if (n == 0) return false
-        index = if (index <= 0) n - 1 else index - 1
-        navAt = SystemClock.uptimeMillis()
-        announce()
-        return true
-    }
-
-    /** 执行当前选项；返回 false 表示这个动作在当前编辑框做不了 */
     fun run(): Boolean {
-        val n = ids.size
-        if (n == 0) return false
-        if (index >= n) index = 0
-        val action = ids[index]
+        val action = currentAction ?: return false
         navAt = SystemClock.uptimeMillis()
         L.i("执行编辑菜单：${ConfigSpec.dynamicName(action) ?: ConfigSpec.actionName(action)}")
         val ok = GestureMap.run(action)
@@ -305,8 +237,7 @@ object EditOptions {
     /** 回到“默认”项（双击跳行首行尾）；列表里没有默认项就回到第一项 */
     private fun backToDefault() {
         dynamicOpen = false
-        val list = baseIds
-        index = list.indexOf(ConfigSpec.ACT_DEFAULT).let { if (it < 0) 0 else it }
+        selectedId = state.current(ids, null)
         navAt = 0L
     }
 

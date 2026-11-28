@@ -352,27 +352,33 @@ object EditActions {
         null
     }
 
-    /**
-     * 编辑框里现在一个字都没有。
-     *
-     * 给编辑菜单用（空框只显示“粘贴”“收起键盘”）。这是跨进程问编辑框，别在每次按键里调，
-     * 只在弹键盘、上屏、删除、粘贴这些节点调（见 [EditOptions.refresh]）。
-     */
-    fun editorEmpty(): Boolean {
-        val c = ic() ?: return true
+    /** null 表示编辑器没有提供足够的信息。 */
+    internal fun editorEmpty(): EditorMenuState {
+        val c = ic() ?: return EditorMenuState()
         return try {
+            val selected = c.getSelectedText(0)
             val before = c.getTextBeforeCursor(1, 0)
             val after = c.getTextAfterCursor(1, 0)
-            val sel = c.getSelectedText(0)
-            before.isNullOrEmpty() && after.isNullOrEmpty() && sel.isNullOrEmpty()
+            val hasSelection = !selected.isNullOrEmpty()
+            val empty = when {
+                hasSelection || !before.isNullOrEmpty() || !after.isNullOrEmpty() -> false
+                before != null && after != null -> true
+                else -> null
+            }
+            val info = ViewA11yHooks.service?.currentInputEditorInfo
+            val canSend = info != null && (info.actionId != 0 ||
+                (info.imeOptions and EditorInfo.IME_MASK_ACTION) in setOf(
+                    EditorInfo.IME_ACTION_SEND, EditorInfo.IME_ACTION_GO,
+                    EditorInfo.IME_ACTION_DONE, EditorInfo.IME_ACTION_SEARCH))
+            EditorMenuState(empty, if (empty == null && selected == null) null else hasSelection, canSend)
         } catch (t: Throwable) {
             L.hookError("EditActions.editorEmpty", t)
-            true
+            EditorMenuState()
         }
     }
 
     /** 整段文字、组字区起点、光标 */
-    private class Snapshot(val text: String, val offset: Int, val start: Int, val end: Int) {
+    private class Snapshot(val text: String, val offset: Int, val start: Int, val end: Int, val complete: Boolean) {
         val caret: Int get() = if (start == end) start else minOf(start, end)
         val hasSelection: Boolean get() = start != end
         fun indexOf(i: Int): Int = (i - offset).coerceIn(0, text.length)
@@ -386,7 +392,8 @@ object EditActions {
             (cls == android.text.InputType.TYPE_CLASS_NUMBER && variation == android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD)) return null
         val et: ExtractedText = ic.getExtractedText(ExtractedTextRequest(), 0) ?: return null
         val t = et.text?.toString() ?: return null
-        Snapshot(t, et.startOffset, et.selectionStart + et.startOffset, et.selectionEnd + et.startOffset)
+        Snapshot(t, et.startOffset, et.selectionStart + et.startOffset, et.selectionEnd + et.startOffset,
+            et.startOffset == 0 && et.partialStartOffset < 0)
     } catch (t: Throwable) {
         null
     }
@@ -476,9 +483,7 @@ object EditActions {
         if (p <= 0) {
             return CaretChar("已到开头", null, atStart = true)
         }
-        val bi = BreakIterator.getCharacterInstance(Locale.getDefault())
-        bi.setText(text)
-        val prev = bi.preceding(p).let { if (it == BreakIterator.DONE || it < 0) (p - 1).coerceAtLeast(0) else it }
+        val prev = TextBoundaries.step(text, p, -1)
         val unit = text.substring(prev, p)
         val explain = CharWords.explainOnly(unit)
         val full = if (explain != null) "$unit，$explain" else spokenUnit(unit)
@@ -558,7 +563,11 @@ object EditActions {
     private fun speakBoundary(dir: Int, s: Snapshot) {
         Sound.play("boundary")
         val text = s.text
-        val n = text.length
+        if (!s.complete) {
+            Speaker.speak("已到当前文本片段边界")
+            return
+        }
+        val n = TextBoundaries.count(text)
         if (n == 0) {
             Speaker.speak("编辑框为空")
             return
@@ -1010,16 +1019,7 @@ object EditActions {
         val p = pos.coerceIn(0, len)
         if (len == 0) return -1
         when (unit) {
-            Unit.CHAR -> {
-                val bi = BreakIterator.getCharacterInstance(Locale.getDefault())
-                bi.setText(text)
-                if (dir > 0) {
-                    val n = bi.following(p)
-                    return if (n == BreakIterator.DONE || n > len) -1 else n
-                }
-                val n = bi.preceding(p)
-                return if (n == BreakIterator.DONE || n < 0) -1 else n
-            }
+            Unit.CHAR -> return TextBoundaries.step(text, p, dir)
             Unit.SENTENCE -> {
                 val symbols = sentenceSymbols()
                 fun symAt(i: Int) = i in 0 until len && symbols.contains(text[i].toString())
@@ -1712,17 +1712,21 @@ object EditActions {
     fun charCount() {
         val ic = ic() ?: return
         val s = snapshot(ic) ?: return
+        if (!s.complete) {
+            Speaker.speak("仅取得部分文本，无法统计全文")
+            return
+        }
         val t = s.text
         if (t.isEmpty()) {
             Speaker.speak("编辑框为空")
             return
         }
-        val noSpace = t.count { !it.isWhitespace() }
+        val total = TextBoundaries.count(t)
         if (s.hasSelection) {
-            val n = kotlin.math.abs(s.end - s.start)
-            Speaker.speak("选中 $n 个字，全文 ${t.length} 个字")
+            val n = TextBoundaries.selectedCount(t, s.indexOf(s.start), s.indexOf(s.end))
+            Speaker.speak("选中 $n 个字，全文 $total 个字")
         } else {
-            Speaker.speak("共 ${t.length} 个字，不含空格 $noSpace 个")
+            Speaker.speak("共 $total 个字，不含空格 ${TextBoundaries.count(t, skipWhitespace = true)} 个")
         }
     }
 

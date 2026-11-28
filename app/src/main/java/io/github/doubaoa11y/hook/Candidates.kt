@@ -29,8 +29,25 @@ object Candidates {
     @Volatile
     var sel = 0
         private set
-    internal data class RawSnapshot(val pinyin: String, val items: List<String>, val engineIdx: List<Int>)
+    internal data class RawSnapshot @JvmOverloads constructor(
+        val pinyin: String,
+        val items: List<String>,
+        val engineIdx: List<Int>,
+        val hasMore: Boolean? = null
+    ) {
+        companion object {
+            @JvmStatic
+            fun parseHasMore(args: Array<Any?>): Boolean? {
+                // 豆包 1.5.7 notifyCandidateBarSnapshot 完整 36 参签名：args[19]=append, args[20]=hasMore, args[21]=showMore, args[22]=showClose
+                if (args.size < 26) return null
+                if (args[19] !is Boolean || args[20] !is Boolean || args[21] !is Boolean || args[22] !is Boolean) return null
+                return args[20] as Boolean
+            }
+        }
+    }
     private var lastSnapshot: RawSnapshot? = null
+    @Volatile
+    private var hasMore: Boolean? = null
 
     private val origin = CandidateOriginState()
     @Volatile
@@ -176,7 +193,15 @@ object Candidates {
         if (list.isEmpty()) return
         val now = sel.coerceIn(0, list.size - 1)
         val n = now + d
-        if (d > 0 && n >= list.size && loadMore(list)) return
+        if (d > 0 && n >= list.size) {
+            if (hasMore == false) {
+                Sound.play("boundary")
+                Speaker.speak("已到本批末尾，" + CharWords.candidate(list[now]))
+                return
+            }
+            loadMore(list, now)
+            return
+        }
         if (n < 0 || n >= list.size || list[n].isBlank()) {
             Sound.play("boundary")
             Speaker.speak("已到头，" + CharWords.candidate(list[now]))
@@ -188,27 +213,33 @@ object Candidates {
         Speaker.speak(CharWords.candidate(list[n]))
     }
 
-    /** 翻页：让豆包加载更多候选（和手指把候选栏划到最后一样）。返回 false 表示没法加载 */
-    private fun loadMore(list: List<String>): Boolean {
-        if (loadingFrom != null) return true
-        val j = JniHooks.jni() ?: return false
-        return try {
-            L.i("候选到最后一个，加载更多（快照 $snapId，现有 ${list.size} 个）")
+    /** 翻页：让豆包加载更多候选（和手指把候选栏划到最后一样） */
+    private fun loadMore(list: List<String>, now: Int) {
+        if (loadingFrom != null) return
+        val j = JniHooks.jni()
+        if (j == null) {
+            Sound.play("boundary")
+            Speaker.speak("当前无法加载更多候选，" + CharWords.candidate(list[now]))
+            return
+        }
+        try {
+            L.i("候选到最后一个，加载更多（快照 $snapId，现有 ${list.size} 个，hasMore=$hasMore）")
             loadingFrom = list
             de.robv.android.xposed.XposedHelpers.callMethod(j, "onCandidateBarCandidateLoadMore", snapId)
             main.removeCallbacksAndMessages(loadToken)
             main.postAtTime({
                 if (loadingFrom != null) {
                     loadingFrom = null
-                    L.i("加载更多候选没有结果")
-                    Speaker.speak("已到头，" + CharWords.candidate(list[list.size - 1]))
+                    L.i("加载更多候选超时（1500ms 无可用新结果）")
+                    Sound.play("boundary")
+                    Speaker.speak("暂未取得更多候选，" + CharWords.candidate(list[now]))
                 }
             }, loadToken, android.os.SystemClock.uptimeMillis() + 1500)
-            true
         } catch (t: Throwable) {
             loadingFrom = null
             L.hookError("Candidates.loadMore", t)
-            false
+            Sound.play("boundary")
+            Speaker.speak("当前无法加载更多候选，" + CharWords.candidate(list[now]))
         }
     }
 
@@ -217,8 +248,12 @@ object Candidates {
         loadingFrom = null
         main.removeCallbacksAndMessages(loadToken)
         if (firstNew < 0 || firstNew >= list.size) {
-            L.i("加载更多后没有新候选（${list.size} 个）")
-            if (old.isNotEmpty()) Speaker.speak("已到头，" + CharWords.candidate(old[old.size - 1]))
+            L.i("加载更多后没有新候选（${list.size} 个，hasMore=$hasMore）")
+            Sound.play("boundary")
+            if (old.isNotEmpty()) {
+                val prefix = if (hasMore == false) "已到本批末尾，" else "暂未取得更多候选，"
+                Speaker.speak(prefix + CharWords.candidate(old[old.size - 1]))
+            }
             sel = (list.size - 1).coerceAtLeast(0)
             return
         }
@@ -292,6 +327,7 @@ object Candidates {
         pinyin = ""
         sel = 0
         lastSnapshot = null
+        hasMore = null
         last = ""
         loadingFrom = null
         main.removeCallbacksAndMessages(token)
@@ -333,10 +369,12 @@ object Candidates {
         val oldPy = pinyin
         val prevList = current
         val prevEng = engineIdx
-        val snapshot = RawSnapshot(py, list, eng)
+        val moreFlag = RawSnapshot.parseHasMore(args)
+        val snapshot = RawSnapshot(py, list, eng, moreFlag)
         val waiting = loadingFrom
         if (snapshot != lastSnapshot) {
             lastSnapshot = snapshot
+            hasMore = moreFlag
             if (waiting != null && py == oldPy) {
                 val merged = CandidatePages.merge(prevList, prevEng, list, eng, hasEngineIdx = idx != null)
                 current = merged.items
