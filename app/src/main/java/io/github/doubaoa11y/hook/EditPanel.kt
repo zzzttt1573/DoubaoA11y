@@ -225,6 +225,7 @@ object EditPanel {
     }
 
     private fun selection(ic: InputConnection): Triple<Int, Int, Int>? {
+        if (!InputPrivacy.mayRead()) return null
         val et = ic.getExtractedText(ExtractedTextRequest(), 0) ?: return null
         val len = et.text?.length ?: return null
         return Triple(et.selectionStart + et.startOffset, et.selectionEnd + et.startOffset, len + et.startOffset)
@@ -299,6 +300,7 @@ object EditPanel {
 
     /** 读光标刚越过的那个字 */
     private fun speakCharAt(ic: InputConnection, dir: Int) {
+        if (!InputPrivacy.mayRead()) return
         val t = if (dir < 0) ic.getTextAfterCursor(1, 0) else ic.getTextBeforeCursor(1, 0)
         val c = t?.toString() ?: return
         Speaker.speak(when (c) {
@@ -310,6 +312,7 @@ object EditPanel {
     }
 
     private fun speakRange(ic: InputConnection, a: Int, b: Int) {
+        if (!InputPrivacy.mayRead()) return
         val n = kotlin.math.abs(a - b)
         val sel = ic.getSelectedText(0)?.toString()
         Speaker.speak(if (sel.isNullOrEmpty()) "已选 $n 个字" else "已选 $sel")

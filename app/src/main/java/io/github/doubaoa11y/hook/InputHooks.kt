@@ -140,7 +140,6 @@ object InputHooks {
             val depths = mutationDepth.get()
             val depth = ((depths?.get(name) ?: 1) - 1).coerceAtLeast(0)
             if (depth == 0) depths?.remove(name) else depths?.set(name, depth)
-            if (depths?.isEmpty() == true) mutationDepth.remove()
             if (p.getObjectExtra(ROOT) != true || p.getObjectExtra(INTERCEPTED) == true ||
                 p.throwable != null || p.result != true || !A11yState.recording) return@SafeHook
             val ic = p.thisObject as? InputConnection ?: return@SafeHook

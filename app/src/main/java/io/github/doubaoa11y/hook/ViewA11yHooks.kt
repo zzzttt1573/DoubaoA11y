@@ -177,18 +177,31 @@ object ViewA11yHooks {
         else -> "0x${Integer.toHexString(a)}"
     }
 
+    private const val NO_ENTRY = ""
+    private val idNameCache = java.util.WeakHashMap<android.content.res.Resources, android.util.SparseArray<String>>()
+
     private fun idName(v: View): String? {
         val id = v.id
         if (id == View.NO_ID || id ushr 24 == 0) return null
-        return try {
-            v.resources.getResourceEntryName(id)
-        } catch (_: Throwable) {
-            null
+        val res = try { v.resources } catch (_: Throwable) { return null } ?: return null
+        synchronized(idNameCache) {
+            val map = idNameCache.getOrPut(res) { android.util.SparseArray() }
+            val cached = map.get(id)
+            if (cached != null) return if (cached === NO_ENTRY) null else cached
+            val name = try {
+                res.getResourceEntryName(id)
+            } catch (_: Throwable) {
+                null
+            }
+            map.put(id, name ?: NO_ENTRY)
+            return name
         }
     }
 
     /** 这个控件应该读成什么；null 表示不用改 */
-    fun nameFor(v: View, info: AccessibilityNodeInfo?): String? {
+    fun nameFor(v: View, info: AccessibilityNodeInfo?): String? = nameFor(v, info, null)
+
+    private fun nameFor(v: View, info: AccessibilityNodeInfo?, precomputedHasText: Boolean?): String? {
         // 自绘键盘由键位模型负责
         if (KeyboardViewHooks.kbClass?.isInstance(v) == true) return null
         val cd = v.contentDescription?.toString()
@@ -217,7 +230,7 @@ object ViewA11yHooks {
         }
         // 父控件把子控件的文字合在一起读的不用管；只处理能点、能获得焦点的
         if (!(v.isClickable || v.isLongClickable || v.isFocusable)) return null
-        if (v is ViewGroup && hasText(v)) return null
+        if (v is ViewGroup && (precomputedHasText ?: hasText(v))) return null
         val guess = entry?.let { Names.guessFromId(it) }
         val key = "${v.javaClass.name}#${entry ?: "无id"}"
         if (reported.add(key)) {
@@ -297,7 +310,11 @@ object ViewA11yHooks {
     }
 
     private fun label(v: View, info: AccessibilityNodeInfo) {
-        if (shouldHide(v, info)) {
+        var groupHasText: Boolean? = null
+        val hide = shouldHide(v, info) {
+            groupHasText ?: (if (v is ViewGroup) hasText(v) else false).also { groupHasText = it }
+        }
+        if (hide) {
             // 父控件已经是一个完整的按钮，里面的图标不再单独占一个焦点
             info.isClickable = false
             info.isLongClickable = false
@@ -308,7 +325,7 @@ object ViewA11yHooks {
             info.isVisibleToUser = false
             return
         }
-        val name = nameFor(v, info) ?: candidateName(v, info) ?: return
+        val name = nameFor(v, info, groupHasText) ?: candidateName(v, info) ?: return
         info.contentDescription = name
     }
 
@@ -324,14 +341,18 @@ object ViewA11yHooks {
     }
 
     /** 没有名字、能点的子控件，外层 3 层内有能点的父控件 → 和父控件重复，隐藏 */
-    fun shouldHide(v: View, info: AccessibilityNodeInfo?): Boolean {
+    fun shouldHide(v: View, info: AccessibilityNodeInfo?): Boolean = shouldHide(v, info) {
+        v is ViewGroup && hasText(v)
+    }
+
+    private inline fun shouldHide(v: View, info: AccessibilityNodeInfo?, hasTextLazy: () -> Boolean): Boolean {
         if (KeyboardViewHooks.kbClass?.isInstance(v) == true) return false
         if (!(v.isClickable || v.isFocusable)) return false
         if (!v.contentDescription.isNullOrBlank()) return false
         if (v is android.widget.TextView && !v.text.isNullOrBlank()) return false
         val entry = idName(v)
         if (entry != null && (Names.viewIds.containsKey(entry) || entry == "candidate_ending" || entry == "symbol_ending")) return false
-        if (v is ViewGroup && hasText(v)) return false
+        if (v is ViewGroup && hasTextLazy()) return false
         var p = v.parent
         var depth = 0
         while (p is View && depth < 3) {
@@ -377,11 +398,13 @@ object ViewA11yHooks {
     private var lastTree: String? = null
     private val main = android.os.Handler(android.os.Looper.getMainLooper())
 
-    /** 键盘显示或切换后自动输出一次（内容没变不重复） */
+    /** 键盘显示或切换后自动输出一次（内容没变不重复；日志未开时直接跳过，避免无意义全树遍历） */
     fun dumpTreeLater(reason: String) {
+        if (!Config.b("runLog") && android.os.SystemClock.uptimeMillis() >= L.forceUntil) return
         main.removeCallbacksAndMessages(TOKEN)
         main.postAtTime({
             try {
+                if (!Config.b("runLog") && android.os.SystemClock.uptimeMillis() >= L.forceUntil) return@postAtTime
                 dumpTree(reason, skipIfSame = true)
             } catch (t: Throwable) {
                 L.e("输出控件树失败", t)

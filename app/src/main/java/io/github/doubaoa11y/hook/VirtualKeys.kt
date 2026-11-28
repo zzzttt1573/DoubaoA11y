@@ -268,11 +268,19 @@ object VirtualKeys {
     private val focusAbove: Boolean get() = keepFocus && A11yState.active
 
     private var barId = 0
+    private var barRef: java.lang.ref.WeakReference<View>? = null
+    private var imeInputViewId = 0
+    private var imeInputViewRef: java.lang.ref.WeakReference<View>? = null
+    private val multiLettersRegex = Regex("[A-Za-z]{2,4}")
+    private val nonTypingKeys = setOf("重写", "返回", "回车", "发送", "收起键盘")
 
     /** 工具栏上边在屏幕上的纵坐标；工具栏不在就返回 null */
     fun toolbarTop(root: View): Int? {
-        if (barId == 0) barId = root.resources.getIdentifier("native_candidate_bar", "id", root.context.packageName)
-        val bar = (if (barId != 0) root.findViewById<View>(barId) else null) ?: return null
+        val cached = barRef?.get()?.takeIf { it.isAttachedToWindow && it.rootView === root }
+        val bar = cached ?: run {
+            if (barId == 0) barId = root.resources.getIdentifier("native_candidate_bar", "id", root.context.packageName)
+            (if (barId != 0) root.findViewById<View>(barId) else null)?.also { barRef = java.lang.ref.WeakReference(it) }
+        } ?: return null
         if (!bar.isShown || bar.height <= 0) return null
         val loc = IntArray(2)
         bar.getLocationOnScreen(loc)
@@ -1016,8 +1024,11 @@ object VirtualKeys {
 
     /** 屏幕坐标 ry 在键盘区域上边往下 12dp 以内，或者更上面 */
     private fun nearTop(root: View, ry: Float): Boolean {
-        val id = root.resources.getIdentifier("ime_inputview", "id", root.context.packageName)
-        val area = (if (id != 0) root.findViewById<View>(id) else null) ?: return false
+        val cached = imeInputViewRef?.get()?.takeIf { it.isAttachedToWindow && it.rootView === root }
+        val area = cached ?: run {
+            if (imeInputViewId == 0) imeInputViewId = root.resources.getIdentifier("ime_inputview", "id", root.context.packageName)
+            (if (imeInputViewId != 0) root.findViewById<View>(imeInputViewId) else null)?.also { imeInputViewRef = java.lang.ref.WeakReference(it) }
+        } ?: return false
         if (!area.isShown || area.height <= 0) return false
         val loc = IntArray(2)
         area.getLocationOnScreen(loc)
@@ -1307,8 +1318,8 @@ object VirtualKeys {
         }
         // 打字：候选栏里接下来弹的候选归“打字”，全屏上半屏的左右滑才去动候选栏。
         // 移动光标之后弹的联想候选不算（见 Candidates.fromTyping），免得编辑文字时左右滑被吃掉。
-        if ((name.length == 1 && name[0].isLetterOrDigit()) || name.matches(Regex("[A-Za-z]{2,4}"))) Candidates.markTyping()
-        else if (name in setOf("重写", "返回", "回车", "发送", "收起键盘")) Candidates.reset("非输入键")
+        if ((name.length == 1 && name[0].isLetterOrDigit()) || multiLettersRegex.matches(name)) Candidates.markTyping()
+        else if (name in nonTypingKeys) Candidates.reset("非输入键")
         // 按键音在手指摸到这个键的时候已经响过了（key_pressed，和参考实现一致），
         // 抬手输入时不再补一声，不然一次按键响两下
         press(v, k, 40)
@@ -1391,8 +1402,10 @@ object VirtualKeys {
             downY = ev.y
             downTime = ev.downTime
             downRoot = root
-            downInScroller = inHorizontalScroller(root, ev.x + loc[0], ev.y + loc[1])
-            val t = targetAt(root, ev.x + loc[0], ev.y + loc[1])
+            val rx = ev.x + loc[0]
+            val ry = ev.y + loc[1]
+            val t = targetAt(root, rx, ry)
+            downInScroller = if (inHandwrite) inHorizontalScroller(root, rx, ry) else false
             if (inHandwrite && !downInScroller) {
                 Candidates.markHandwriting()
                 passThrough = true

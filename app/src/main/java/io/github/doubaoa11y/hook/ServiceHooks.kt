@@ -47,10 +47,16 @@ object ServiceHooks {
         val integer = Int::class.javaPrimitiveType!!
         Hooker.method(c, "onUpdateSelection", Array(6) { integer }, SafeHook("candidate.selection", after = { p ->
             if (!A11yState.recording) return@SafeHook
-            val values = p.args.map { it as? Int ?: -1 }
-            if (values[0] != values[2] || values[1] != values[3])
-                Candidates.onExternalSelection(values[4] >= 0 && values[5] >= 0)
-            EditActions.onUpdateSelection(values[0], values[1], values[2], values[3])
+            val a = p.args
+            val oldSelStart = a[0] as? Int ?: -1
+            val oldSelEnd = a[1] as? Int ?: -1
+            val newSelStart = a[2] as? Int ?: -1
+            val newSelEnd = a[3] as? Int ?: -1
+            val candStart = a[4] as? Int ?: -1
+            val candEnd = a[5] as? Int ?: -1
+            if (oldSelStart != newSelStart || oldSelEnd != newSelEnd)
+                Candidates.onExternalSelection(candStart >= 0 && candEnd >= 0)
+            EditActions.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd)
         }))
         installHideHooks(cl)
         Hooker.method(c, "onComputeInsets", arrayOf(android.inputmethodservice.InputMethodService.Insets::class.java),

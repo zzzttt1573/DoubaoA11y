@@ -157,8 +157,16 @@ class DrawTable(var windowName: String) {
         revision++
     }
 
-    /** 把绘制项归并成键 */
+    private var cachedKeysRevision = -1L
+    private var cachedKeysWidth = -1
+    private var cachedKeysHeight = -1
+    private var cachedKeys: List<Key>? = null
+
+    /** 把绘制项归并成键（按 revision 与尺寸缓存，避免每次手指移动重建整张键表） */
     fun keys(): List<Key> {
+        cachedKeys?.let { hit ->
+            if (cachedKeysRevision == revision && cachedKeysWidth == width && cachedKeysHeight == height) return hit
+        }
         val viewArea = max(1, width) * max(1, height).toLong()
         // 太大的背景框（整块键盘背景等）不算键
         val live = items.filter { !it.popup }
@@ -210,6 +218,10 @@ class DrawTable(var windowName: String) {
             if (!clipped) keys.add(Key(Rect(o.rect), null, listOf(o)))
         }
         keys.sortWith(compareBy<Key> { it.rect.top / 8 }.thenBy { it.rect.left })
+        cachedKeysRevision = revision
+        cachedKeysWidth = width
+        cachedKeysHeight = height
+        cachedKeys = keys
         return keys
     }
 
@@ -329,12 +341,30 @@ class DrawTable(var windowName: String) {
      * maxDist 以内最近的、有名字的键和它的距离，没有就返回 null。
      * 给落指死区兜底用：手指落在键盘视图外面时 keyAt 根本不会被问到。距离一样时取小键。
      */
-    fun nearest(x: Float, y: Float, maxDist: Float): Pair<Key, Float>? =
-        keys().filter { it.speakable().isNotBlank() }
-            .map { it to rectDist(it.rect, x, y) }
-            .filter { it.second <= maxDist }
-            .minWithOrNull(compareBy<Pair<Key, Float>> { it.second }
-                .thenBy { it.first.rect.width().toLong() * it.first.rect.height() })
+    fun nearest(x: Float, y: Float, maxDist: Float): Pair<Key, Float>? {
+        val ks = keys()
+        var bestKey: Key? = null
+        var bestDist = Float.MAX_VALUE
+        var bestArea = Long.MAX_VALUE
+        var i = 0
+        val n = ks.size
+        while (i < n) {
+            val k = ks[i]
+            if (k.speakable().isNotBlank()) {
+                val d = rectDist(k.rect, x, y)
+                if (d <= maxDist) {
+                    val area = k.rect.width().toLong() * k.rect.height()
+                    if (bestKey == null || d < bestDist || (d == bestDist && area < bestArea)) {
+                        bestKey = k
+                        bestDist = d
+                        bestArea = area
+                    }
+                }
+            }
+            i++
+        }
+        return bestKey?.let { it to bestDist }
+    }
 
     private fun rectDist(r: Rect, x: Float, y: Float): Float {
         val dx = max(0f, max(r.left - x, x - r.right))

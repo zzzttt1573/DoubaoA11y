@@ -41,6 +41,23 @@ internal object VoiceZoneReader {
     private val fieldCache = ConcurrentHashMap<Class<*>, VoiceFields>()
     private fun fieldsOf(o: Any) = fieldCache.computeIfAbsent(o.javaClass) { VoiceFields(it) }
 
+    private var cachedPkg: String? = null
+    private var actionBtnId = 0
+    private var longPressTextId = 0
+    private var retractTipId = 0
+    private var lastAsrRef: java.lang.ref.WeakReference<View>? = null
+    private var lastBtnRef: java.lang.ref.WeakReference<View>? = null
+    private var lastTextViewRef: java.lang.ref.WeakReference<TextView>? = null
+
+    private fun ensureIds(asr: View, pkg: String) {
+        if (cachedPkg == pkg && (actionBtnId != 0 || longPressTextId != 0)) return
+        val res = asr.resources
+        cachedPkg = pkg
+        actionBtnId = res.getIdentifier("asr_action_btn", "id", pkg)
+        longPressTextId = res.getIdentifier("asr_long_press_text", "id", pkg)
+        retractTipId = res.getIdentifier("asr_long_press_retract_tip", "string", pkg)
+    }
+
     @JvmStatic
     fun isCancelZone(zone: String): Boolean = zone.contains("撤回") || zone.contains("取消")
 
@@ -74,8 +91,18 @@ internal object VoiceZoneReader {
         } ?: return null
         if (asr.visibility != View.VISIBLE) return null
         val pkg = asr.context.packageName
-        val id = asr.resources.getIdentifier("asr_action_btn", "id", pkg)
-        val btn = if (id != 0) asr.findViewById<View>(id) else null
+        ensureIds(asr, pkg)
+        val sameAsr = lastAsrRef?.get() === asr
+        val btn = if (sameAsr) {
+            lastBtnRef?.get()?.takeIf { it.isAttachedToWindow }
+                ?: if (actionBtnId != 0) asr.findViewById<View>(actionBtnId).also { lastBtnRef = it?.let { v -> java.lang.ref.WeakReference(v) } } else null
+        } else {
+            lastAsrRef = java.lang.ref.WeakReference(asr)
+            val foundBtn = if (actionBtnId != 0) asr.findViewById<View>(actionBtnId) else null
+            lastBtnRef = foundBtn?.let { java.lang.ref.WeakReference(it) }
+            lastTextViewRef = null
+            foundBtn
+        }
         val (left, right) = if (btn != null) {
             val tVal = boolField(btn, "t")
             val sVal = boolField(btn, "s")
@@ -90,14 +117,15 @@ internal object VoiceZoneReader {
         } else {
             false to false
         }
-        val textId = asr.resources.getIdentifier("asr_long_press_text", "id", pkg)
-        val centerText = if (textId != 0) {
-            (asr.findViewById<View>(textId) as? TextView)?.text?.toString()?.trim().orEmpty()
-        } else ""
+        val textView = lastTextViewRef?.get()?.takeIf { sameAsr && it.isAttachedToWindow }
+            ?: if (longPressTextId != 0) {
+                (asr.findViewById<View>(longPressTextId) as? TextView).also { lastTextViewRef = it?.let { tv -> java.lang.ref.WeakReference(tv) } }
+            } else null
+        val centerText = textView?.text?.toString()?.trim().orEmpty()
         val btnTexts = btn?.let { readBtnTexts(it) }
         val resRight = btn?.let { readSendResourceLabel(asr, it) }
         val leftLabel = btnTexts?.first?.takeIf { it.isNotEmpty() }
-            ?: readHostTip(asr, pkg, "asr_long_press_retract_tip")
+            ?: readHostTip(asr)
         val rightLabel = btnTexts?.second?.takeIf { it.isNotEmpty() } ?: resRight
         val zone = resolveZone(left, right, centerText, leftLabel, rightLabel)
         return Reading(zone, centerText) {
@@ -118,8 +146,8 @@ internal object VoiceZoneReader {
         null
     }
 
-    private fun readHostTip(asr: View, pkg: String, resName: String): String? = try {
-        val id = asr.resources.getIdentifier(resName, "string", pkg)
+    private fun readHostTip(asr: View): String? = try {
+        val id = retractTipId
         if (id == 0) null else asr.resources.getString(id).trim().takeIf { it.isNotEmpty() }
     } catch (_: Throwable) {
         null

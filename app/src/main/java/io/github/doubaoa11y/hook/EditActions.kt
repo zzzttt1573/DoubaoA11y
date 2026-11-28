@@ -349,8 +349,20 @@ object EditActions {
     // setSelection 直接把光标移过去，最后读越过的那段字。这样操作的是 InputConnection 的选区，
     // 与读屏、豆包原生编辑面板各走各的，天然不冲突、不错位。
 
-    /** 默认的“句子结束”标点，和天坦输入法 SENTENCE_SYMBOL_DEFAULT 一致 */
-    private fun sentenceSymbols() = ConfigSpec.sentenceList(Config.s("sentenceSymbols")).toSet()
+    /** 默认的“句子结束”标点，和天坦输入法 SENTENCE_SYMBOL_DEFAULT 一致（按配置原串缓存，避免逐字扫描反复建集合） */
+    @Volatile
+    private var cachedSentenceRaw: String? = null
+    @Volatile
+    private var cachedSentenceSet: Set<String> = emptySet()
+
+    private fun sentenceSymbols(): Set<String> {
+        val raw = Config.s("sentenceSymbols")
+        if (raw == cachedSentenceRaw) return cachedSentenceSet
+        val parsed = ConfigSpec.sentenceList(raw).toSet()
+        cachedSentenceRaw = raw
+        cachedSentenceSet = parsed
+        return parsed
+    }
 
     private fun isSentenceSymbol(c: Char): Boolean = sentenceSymbols().contains(c.toString())
 
@@ -364,21 +376,27 @@ object EditActions {
     internal fun editorEmpty(): EditorMenuState {
         val c = ic() ?: return EditorMenuState()
         return try {
-            val selected = c.getSelectedText(0)
-            val before = c.getTextBeforeCursor(1, 0)
-            val after = c.getTextAfterCursor(1, 0)
-            val hasSelection = !selected.isNullOrEmpty()
-            val empty = when {
-                hasSelection || !before.isNullOrEmpty() || !after.isNullOrEmpty() -> false
-                before != null && after != null -> true
-                else -> null
-            }
             val info = ViewA11yHooks.service?.currentInputEditorInfo
             val canSend = info != null && (info.actionId != 0 ||
                 (info.imeOptions and EditorInfo.IME_MASK_ACTION) in setOf(
                     EditorInfo.IME_ACTION_SEND, EditorInfo.IME_ACTION_GO,
                     EditorInfo.IME_ACTION_DONE, EditorInfo.IME_ACTION_SEARCH))
-            EditorMenuState(empty, if (empty == null && selected == null) null else hasSelection, canSend)
+            if (!InputPrivacy.mayRead()) return EditorMenuState(canSend = canSend)
+            val selected = c.getSelectedText(0)
+            if (!selected.isNullOrEmpty()) {
+                return EditorMenuState(empty = false, selected = true, canSend = canSend)
+            }
+            val before = c.getTextBeforeCursor(1, 0)
+            if (!before.isNullOrEmpty()) {
+                return EditorMenuState(empty = false, selected = false, canSend = canSend)
+            }
+            val after = c.getTextAfterCursor(1, 0)
+            val empty = when {
+                !after.isNullOrEmpty() -> false
+                before != null && after != null -> true
+                else -> null
+            }
+            EditorMenuState(empty, if (empty == null && selected == null) null else false, canSend)
         } catch (t: Throwable) {
             L.hookError("EditActions.editorEmpty", t)
             EditorMenuState()
@@ -392,20 +410,17 @@ object EditActions {
         fun indexOf(i: Int): Int = (i - offset).coerceIn(0, text.length)
     }
 
-    private fun snapshot(ic: InputConnection): Snapshot? { return try {
-        val type = ViewA11yHooks.service?.currentInputEditorInfo?.inputType ?: 0
-        val variation = type and android.text.InputType.TYPE_MASK_VARIATION
-        val cls = type and android.text.InputType.TYPE_MASK_CLASS
-        if ((cls == android.text.InputType.TYPE_CLASS_TEXT && variation in setOf(android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD, android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD, android.text.InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD)) ||
-            (cls == android.text.InputType.TYPE_CLASS_NUMBER && variation == android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD)) return null
-        val et: ExtractedText = ic.getExtractedText(ExtractedTextRequest(), 0) ?: return null
-        val t = et.text?.toString() ?: return null
-        Snapshot(t, et.startOffset, et.selectionStart + et.startOffset, et.selectionEnd + et.startOffset,
-            et.startOffset == 0 && et.partialStartOffset < 0)
-    } catch (t: Throwable) {
+    private fun snapshot(ic: InputConnection): Snapshot? = try {
+        if (!InputPrivacy.mayRead()) null
+        else {
+            val et: ExtractedText? = ic.getExtractedText(ExtractedTextRequest(), 0)
+            val t = et?.text?.toString()
+            if (et == null || t == null) null
+            else Snapshot(t, et.startOffset, et.selectionStart + et.startOffset, et.selectionEnd + et.startOffset,
+                et.startOffset == 0 && et.partialStartOffset < 0)
+        }
+    } catch (_: Throwable) {
         null
-    }
-
     }
 
     // ---------------- 字 ----------------
@@ -438,9 +453,14 @@ object EditActions {
             }
             // 选择态已失效（残留）：往下走普通移动
         }
-        if (!selecting && tryFastStep(ic, dir)) return
+        if (!selecting) {
+            when (tryFastStep(ic, dir)) {
+                FastStepResult.DONE, FastStepResult.REJECTED -> return
+                FastStepResult.FALLBACK -> {}
+            }
+        }
         val s = cached ?: snapshot(ic) ?: run {
-            // 拿不到文本快照（罕见）：退回方向键兜底，至少光标能动
+            // 拿不到文本快照（罕见或密码框）：退回方向键兜底，至少光标能动
             send(if (dir < 0) KeyEvent.KEYCODE_DPAD_LEFT else KeyEvent.KEYCODE_DPAD_RIGHT)
             return
         }
@@ -453,7 +473,11 @@ object EditActions {
         }
         // setSelection 直接移动光标（选区收缩成一点）
         val absTarget = s.offset + target
-        ic.setSelection(absTarget, absTarget)
+        if (!ic.setSelection(absTarget, absTarget)) {
+            lastSelStart = -1
+            lastSelEnd = -1
+            return
+        }
         lastSelStart = absTarget
         lastSelEnd = absTarget
         // 光标一动，应用自己会发“选区变了”，读屏立刻把那个字念出来；
@@ -464,43 +488,59 @@ object EditActions {
         speakCharMove(seg)
     }
 
+    private enum class FastStepResult { DONE, FALLBACK, REJECTED }
+
     /**
      * 快速按字移动路径：仅通过 getTextBeforeCursor/getTextAfterCursor 局部读取最多 16 个字符，
      * 避免每次左右滑都通过 getExtractedText 跨进程拷贝整个编辑框全文。
-     * 命中边界（开头/结尾）或检测到光标缓存与局部文本不一致时返回 false，自动回退到完整 snapshot 路径。
+     * 区分三种结果：
+     * - DONE：已成功移动并触发播报；
+     * - REJECTED：已尝试移动但宿主拒绝 setSelection，清缓存且不回退慢路径（避免移动两次）；
+     * - FALLBACK：尚未尝试移动（隐私禁止/边界/窗口截断/缓存不一致），交由慢路径处理。
      */
-    private fun tryFastStep(ic: InputConnection, dir: Int): Boolean {
+    private fun tryFastStep(ic: InputConnection, dir: Int): FastStepResult {
+        if (!InputPrivacy.mayRead()) return FastStepResult.FALLBACK
         val pos = lastSelStart
-        if (pos < 0 || pos != lastSelEnd) return false
+        if (pos < 0 || pos != lastSelEnd) return FastStepResult.FALLBACK
         val window = 16
         return try {
-            val before = ic.getTextBeforeCursor(window, 0)?.toString() ?: return false
+            val before = ic.getTextBeforeCursor(window, 0)?.toString() ?: return FastStepResult.FALLBACK
             // 一致性校验：若光标前不足 window 字，其长度必须与缓存绝对偏移一致，否则回退全量快照
-            if (before.length < window && before.length != pos) return false
+            if (before.length < window && before.length != pos) return FastStepResult.FALLBACK
             if (dir < 0) {
-                if (before.isEmpty()) return false // 到开头边界，走完整 snapshot 播报边界文案
+                if (before.isEmpty()) return FastStepResult.FALLBACK // 到开头边界，走完整 snapshot 播报边界文案
                 val prev = TextBoundaries.step(before, before.length, -1)
-                if (prev < 0 || prev >= before.length) return false
+                if (prev < 0 || prev >= before.length) return FastStepResult.FALLBACK
                 val stepLen = before.length - prev
                 val newPos = pos - stepLen
-                if (newPos < 0) return false
+                if (newPos < 0) return FastStepResult.FALLBACK
                 // 如果恰好退到 16 字窗口起点但绝对位置 > 0，无法确定光标前一个完整字，回退全量快照
-                if (prev == 0 && newPos > 0) return false
-                ic.setSelection(newPos, newPos)
+                if (prev == 0 && newPos > 0) return FastStepResult.FALLBACK
+                if (!ic.setSelection(newPos, newPos)) {
+                    lastSelStart = -1
+                    lastSelEnd = -1
+                    return FastStepResult.REJECTED
+                }
                 lastSelStart = newPos
                 lastSelEnd = newPos
                 Speaker.hushReader()
                 val seg = if (newPos <= 0) CaretChar("已到开头", null, atStart = true)
                 else charBeforeCaret(before, prev)
                 speakCharMove(seg)
-                true
+                FastStepResult.DONE
             } else {
-                val after = ic.getTextAfterCursor(window, 0)?.toString() ?: return false
-                if (after.isEmpty()) return false // 到结尾边界，走完整 snapshot 播报边界文案
+                val after = ic.getTextAfterCursor(window, 0)?.toString() ?: return FastStepResult.FALLBACK
+                if (after.isEmpty()) return FastStepResult.FALLBACK // 到结尾边界，走完整 snapshot 播报边界文案
                 val next = TextBoundaries.step(after, 0, 1)
-                if (next <= 0 || next > after.length) return false
+                if (next <= 0 || next > after.length) return FastStepResult.FALLBACK
+                // 若 16 个 UTF-16 单元恰好耗尽，无法确认末端是否截断了超长字素簇，回退全量快照
+                if (after.length == window && next >= after.length) return FastStepResult.FALLBACK
                 val newPos = pos + next
-                ic.setSelection(newPos, newPos)
+                if (!ic.setSelection(newPos, newPos)) {
+                    lastSelStart = -1
+                    lastSelEnd = -1
+                    return FastStepResult.REJECTED
+                }
                 lastSelStart = newPos
                 lastSelEnd = newPos
                 Speaker.hushReader()
@@ -508,10 +548,10 @@ object EditActions {
                 val explain = cursorExplanation(unit, Config.b("fsCursorExplainWord"), Config.b("fsCursorExplainLetter"))
                 val full = if (explain != null) "${spokenUnit(unit)}，$explain" else spokenUnit(unit)
                 speakCharMove(CaretChar(full, explain, atStart = false))
-                true
+                FastStepResult.DONE
             }
         } catch (_: Throwable) {
-            false
+            FastStepResult.FALLBACK
         }
     }
 

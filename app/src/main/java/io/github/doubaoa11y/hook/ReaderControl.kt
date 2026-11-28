@@ -48,7 +48,6 @@ object ReaderControl {
         try {
             if (visible) {
                 sync()
-                ModuleEntries.toolbar()
             } else {
                 restore()
             }

@@ -165,7 +165,9 @@ object KeyboardViewHooks {
                     return@SafeHook
                 }
                 if (c.isInstance(v)) {
-                    onHover(v, ev)
+                    if (Config.b("logTouch") || (Config.b("debugSpeak") && !VirtualKeys.enabled)) {
+                        onHover(v, ev)
+                    }
                     // 阶段 2：虚拟按键接管悬停，豆包原来的处理（把整个键盘当一个控件）不再执行
                     VirtualKeys.onHover(v as View, ev)?.let { p.result = it }
                 }
